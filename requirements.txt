@@ -1,0 +1,5 @@
+PySide6-Essentials==6.11.2
+pyzipper==0.4.0
+pycryptodomex==3.24.1
+py7zr==1.1.4
+pyinstaller==6.22.3

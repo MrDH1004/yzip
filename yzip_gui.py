@@ -1746,6 +1746,9 @@ def main():
     if args[:1] in (["--register-shell"], ["--unregister-shell"]):  # UI-free, for scripts and installers
         (shell_register if args[0] == "--register-shell" else shell_unregister)()
         return 0
+    if args[:1] == ["--auto-update"] and len(args) > 1:  # installer: the user's choice on the tasks page
+        save_setting("auto_update", args[1].lower() in ("on", "1", "true"))
+        return 0
     if args[:1] in (["--associate"], ["--unassociate"], ["--unregister-all"]):  # installer / uninstaller
         import assoc
         if args[0] == "--associate":

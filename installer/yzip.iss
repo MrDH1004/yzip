@@ -18,6 +18,11 @@ AppPublisherURL=https://github.com/MrDH1004/yzip
 AppSupportURL=https://github.com/MrDH1004/yzip/issues
 AppUpdatesURL=https://github.com/MrDH1004/yzip/releases
 VersionInfoVersion={#AppVersion}
+VersionInfoProductName=yzip
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
+VersionInfoDescription=yzip setup
+VersionInfoCopyright=Copyright (c) 2026 MrDH1004. MIT License.
 DefaultDirName={localappdata}\Programs\yzip
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -31,6 +36,8 @@ UninstallDisplayName=yzip
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+LicenseFile=..\LICENSE
+InfoBeforeFile=INFO.txt
 CloseApplications=force
 RestartApplications=no
 
@@ -39,6 +46,7 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
 Name: "assoc"; Description: "압축 파일(.zip, .7z, .tar 등)을 yzip으로 열기"
+Name: "autoupdate"; Description: "업데이트 자동 확인 (하루 한 번 GitHub에 최신 버전 문의)"
 Name: "desktopicon"; Description: "바탕 화면에 바로 가기 만들기"; Flags: unchecked
 
 [InstallDelete]
@@ -54,7 +62,10 @@ Name: "{userdesktop}\yzip"; Filename: "{app}\yzip.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\yzip.exe"; Parameters: "--register-shell"; Flags: runhidden waituntilterminated
-Filename: "{app}\yzip.exe"; Parameters: "--associate"; Tasks: assoc; Flags: runhidden waituntilterminated
+; these apply the tasks-page choices; an update keeps whatever the user set in the app since
+Filename: "{app}\yzip.exe"; Parameters: "--associate"; Tasks: assoc; Flags: runhidden waituntilterminated; Check: not IsUpdate
+Filename: "{app}\yzip.exe"; Parameters: "--auto-update on"; Tasks: autoupdate; Flags: runhidden waituntilterminated; Check: not IsUpdate
+Filename: "{app}\yzip.exe"; Parameters: "--auto-update off"; Tasks: not autoupdate; Flags: runhidden waituntilterminated; Check: not IsUpdate
 Filename: "{app}\yzip.exe"; Description: "yzip 실행"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\yzip.exe"; Parameters: "--updated"; Flags: nowait; Check: IsUpdate
 
