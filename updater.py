@@ -94,7 +94,7 @@ def download(rel: Release, progress: Optional[Callable[[int, int, str], None]] =
 def launch_installer(path: str) -> None:
     """Start the installer silently and detached; the caller exits right after so files can be replaced."""
     flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+    subprocess.Popen([path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/UPDATE=1"],
                      creationflags=flags, close_fds=True)
 
 

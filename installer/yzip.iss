@@ -56,10 +56,28 @@ Name: "{userdesktop}\yzip"; Filename: "{app}\yzip.exe"; Tasks: desktopicon
 Filename: "{app}\yzip.exe"; Parameters: "--register-shell"; Flags: runhidden waituntilterminated
 Filename: "{app}\yzip.exe"; Parameters: "--associate"; Tasks: assoc; Flags: runhidden waituntilterminated
 Filename: "{app}\yzip.exe"; Description: "yzip 실행"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\yzip.exe"; Parameters: "--updated"; Flags: nowait; Check: WizardSilent
+Filename: "{app}\yzip.exe"; Parameters: "--updated"; Flags: nowait; Check: IsUpdate
 
 [UninstallRun]
 Filename: "{app}\yzip.exe"; Parameters: "--unregister-all"; Flags: runhidden waituntilterminated; RunOnceId: "yzipUnregister"
+
+[Code]
+// The new version is started afterwards only for an update: yzip's updater passes /UPDATE=1, and a silent
+// run over an existing install counts too (1.0.0's updater did not pass the flag). A scripted silent first
+// install does not open a window.
+var
+  WasInstalled: Boolean;
+
+function InitializeSetup: Boolean;
+begin
+  WasInstalled := RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B3F7E2A1-6C4D-4E8B-9A15-2D7C8E0F4A63}_is1');
+  Result := True;
+end;
+
+function IsUpdate: Boolean;
+begin
+  Result := (ExpandConstant('{param:UPDATE|0}') = '1') or (WizardSilent and WasInstalled);
+end;
 
 [UninstallDelete]
 ; copies of the Explorer extension (one per build); a copy Explorer still has loaded cannot be deleted
