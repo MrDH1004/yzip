@@ -113,7 +113,8 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $tags = @(gh release list --limit 100 --json tagName --jq '.[].tagName')
           if ($tags -notcontains $tag) {
-            gh release create $tag --title "yzip $v" --generate-notes
+            # every release page states the code signing policy (a SignPath Foundation requirement)
+            gh release create $tag --title "yzip $v" --notes-file .github\release-signing.md --generate-notes
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           gh release upload $tag "dist\$name" "dist\$name.sha256" --clobber
