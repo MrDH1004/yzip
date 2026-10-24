@@ -58,7 +58,7 @@ def open_path(path: str):
 
 
 class Worker(QThread):
-    progress = Signal(int, int, str)
+    progress = Signal(object, object, str)  # int would wrap above 2 GiB
 
     def __init__(self, fn):
         super().__init__()
@@ -177,11 +177,11 @@ class ProgressWindow(QDialog):
         save_setting("low_priority", on)
 
     # ----- progress -----
-    @Slot(int, int, str)
+    @Slot(object, object, str)
     def on_progress(self, d, t, n):  # a slot on a GUI-thread QObject, so worker signals are queued here
         self.last = (d, t)
         now = time.time()
-        if now - self._painted >= 0.05 or d >= t:  # thousands of small files: repaint at most 20x/s
+        if now - self._painted >= 0.05 or (t and d >= t):  # thousands of small files: repaint at most 20x/s
             self._painted = now
             self._show_stats(d, t, n)
 
@@ -356,7 +356,11 @@ class CompressDialog(QDialog):
             name = self.one_file or name
         elif self.one_file and name == self.one_file:  # back from b.bin.xz to an archive: b.zip
             name = os.path.splitext(name)[0]
-        self.path.setText(os.path.join(os.path.dirname(cur), name + f.ext))
+        base = os.path.join(os.path.dirname(cur), name)
+        out, i = base + f.ext, 2
+        while os.path.exists(out) and out != cur:  # switching format must not land on an existing file
+            out, i = f"{base} ({i}){f.ext}", i + 1
+        self.path.setText(out)
         for w in (self.pw, self.pw2, self.show_pw):
             w.setEnabled(f.password)
         if not f.password:
@@ -381,7 +385,11 @@ class CompressDialog(QDialog):
             QMessageBox.warning(self, APP, "암호가 서로 다릅니다.")
             return
         if self.split_bytes() < 0:
-            QMessageBox.warning(self, APP, "분할 크기를 이해할 수 없습니다. 예: 100MB, 1440KB")
+            QMessageBox.warning(self, APP, "분할 크기를 이해할 수 없습니다. 예: 100MB, 1440KB (최소 64KB)")
+            return
+        out = self.options()["out_path"]
+        if os.path.exists(out) and QMessageBox.question(
+                self, APP, f"{os.path.basename(out)} 파일이 이미 있습니다. 덮어쓸까요?") != QMessageBox.Yes:
             return
         self.accept()
 
@@ -391,9 +399,10 @@ class CompressDialog(QDialog):
             return 0
         from yzip_cli import parse_size
         try:
-            return parse_size(t)
+            n = parse_size(t)
         except Exception:
             return -1
+        return n if n >= 64 << 10 else -1  # "1" would mean one-byte volumes
 
     def options(self) -> dict:
         f = self.current_format()
@@ -1013,8 +1022,9 @@ class Main(QMainWindow):
         if len(paths) == 1 and paths[0].lower().endswith(tuple(formats.READ_EXTS) + (".001",)) \
                 and os.path.isfile(paths[0]):
             self.open_archive(paths[0])
-        elif self.arc_path and not ziplib.is_split_first(self.arc_path):
-            self.add_paths(paths)
+        elif self.arc_path:
+            if self._editable():  # ZIP only; says why otherwise
+                self.add_paths(paths)
         else:
             self.new_archive(paths)
 
@@ -1195,10 +1205,10 @@ class Main(QMainWindow):
             self.go_to(items[0].data(0, self.NAME))
             return
         name = items[0].data(0, self.NAME)
-        tmp = tempfile.mkdtemp(prefix="yzip_")
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="yzip_"))
         if self._do_extract(tmp, [name], "overwrite"):
-            p = os.path.join(tmp, *name.split("/"))
-            if os.path.isfile(p):
+            p = ziplib.safe_target(tmp, name)  # where the extractor wrote it; never a path the name points to
+            if p and os.path.isfile(p):
                 open_path(p)
 
     # ----- create -----
@@ -1260,17 +1270,11 @@ class Main(QMainWindow):
             self.add_paths(paths)
 
     def add_paths(self, paths):
-        arc = self.arc_path
+        arc, into = self.arc_path, self.cwd
 
-        def job(prog, canc):
-            tmp = tempfile.mkdtemp(prefix="yzip_add_")
-            try:
-                with ziplib.Archive(arc, self.password) as z:
-                    z.extract(tmp, cancel=canc)
-                roots = [os.path.join(tmp, n) for n in os.listdir(tmp)] + list(paths)
-                ziplib.create_zip(roots, arc, password=self.password, progress=prog, cancel=canc)
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
+        def job(prog, canc):  # existing entries are copied as they are; same names are replaced
+            # self.password is read here, after _modify asked for it
+            ziplib.edit_zip(arc, add=paths, password=self.password, progress=prog, cancel=canc, into=into)
         self._modify("추가 중...", job)
 
     def delete_selected(self):
@@ -1281,17 +1285,8 @@ class Main(QMainWindow):
             return
         arc, doomed = self.arc_path, tuple(names)
 
-        def job(prog, canc):
-            tmp = tempfile.mkdtemp(prefix="yzip_del_")
-            try:
-                with ziplib.Archive(arc, self.password) as z:
-                    keep = [e.name for e in z.entries()
-                            if not any(e.name == d or e.name.startswith(d.rstrip("/") + "/") for d in doomed)]
-                    z.extract(tmp, keep, cancel=canc)
-                roots = [os.path.join(tmp, n) for n in os.listdir(tmp)]
-                ziplib.create_zip(roots, arc, password=self.password, progress=prog, cancel=canc)
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
+        def job(prog, canc):  # the other entries are copied byte for byte, nothing is decompressed
+            ziplib.edit_zip(arc, drop=doomed, progress=prog, cancel=canc)
         self._modify("삭제 중...", job)
 
     def _modify(self, title, job):
@@ -1380,6 +1375,7 @@ class Main(QMainWindow):
         if kind == "cancel":
             self.status.showMessage("취소됨", 5000)
         elif kind == "password":
+            self.password = None  # ask again next time instead of reusing the wrong one
             QMessageBox.warning(self, APP, "암호가 틀렸습니다.")
         else:
             QMessageBox.critical(self, APP, msg)

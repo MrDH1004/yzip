@@ -60,6 +60,7 @@ BY_ID = {f.id: f for f in FORMATS}
 READ_EXTS = [".zip", ".7z", ".tar", ".tgz", ".gz", ".tbz", ".tbz2", ".bz2", ".txz", ".xz", ".tzst", ".zst"]
 OPEN_FILTER = "압축 파일 (" + " ".join("*" + e for e in READ_EXTS + [".001"]) + ");;모든 파일 (*.*)"
 _MULTI_EXTS = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
+_TAR_NAMES = _MULTI_EXTS + (".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst")
 
 
 def stem(path: str) -> str:
@@ -83,10 +84,10 @@ def with_format(path: str, fmt_id: str) -> str:
 
 def detect(path: str) -> str:
     """'zip' | '7z' | 'tar' (any compression) | 'gz' | 'bz2' | 'xz' | 'zst'; ValueError if none of these."""
-    if ziplib.is_split_first(path):
-        return "zip"
     with open(path, "rb") as f:
         head = f.read(8)
+    if ziplib.is_split_first(path):
+        return "7z" if head[:6] == b"7z\xbc\xaf\x27\x1c" else "zip"
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
         return "zip"
     if head[:6] == b"7z\xbc\xaf\x27\x1c":
@@ -95,7 +96,8 @@ def detect(path: str) -> str:
         with tarfile.open(path, "r:*"):
             return "tar"
     except Exception:  # not a tar; each decompressor raises its own error types
-        pass
+        if path.lower().endswith(_TAR_NAMES):  # a damaged tar.xz is still a tar: report it, never unpack the
+            return "tar"                      # whole stream as one file
     if head[:2] == b"\x1f\x8b":
         return "gz"
     if head[:3] == b"BZh":
@@ -114,6 +116,15 @@ def open_any(path: str, password: Optional[str] = None):
     if kind == "zip":
         return ziplib.Archive(path, password)
     if kind == "7z":
+        if ziplib.is_split_first(path):  # a.7z.001, .002 ... (7-Zip / Bandizip volumes): read the joined copy
+            tmp = ziplib.join_split(path)
+            try:
+                a = SevenZArchive(tmp, password)
+            except BaseException:
+                os.remove(tmp)
+                raise
+            a.joined = tmp
+            return a
         return SevenZArchive(path, password)
     if kind == "tar":
         return TarArchive(path)
@@ -133,32 +144,37 @@ class _Planner:
     """Maps archive names to safe targets under dest (no traversal) and applies the overwrite policy:
     True replaces, False skips existing files, "rename" picks "name (2).ext"."""
 
-    def __init__(self, dest: str, overwrite):
+    def __init__(self, dest: str, overwrite, archive: Optional[str] = None):
         self.root = os.path.realpath(dest)
         os.makedirs(self.root, exist_ok=True)
         self.overwrite = overwrite
-        self.taken: set[str] = set()
+        # the archive being read is never a target: 'backup' (a gzip without extension) would unpack onto itself
+        self.taken: set[str] = {os.path.realpath(archive).lower()} if archive else set()
+        self.given: dict[str, str] = {}  # target (lower) -> member name it was handed to in this run
 
     def target(self, name: str, is_dir: bool) -> Optional[str]:
-        rel = ziplib._safe_rel(name)
-        if not rel:
-            return None
-        t = os.path.realpath(os.path.join(self.root, *rel.split("/")))
-        if os.path.commonpath([self.root, t]) != self.root:
+        t = ziplib.safe_target(self.root, name)
+        if t is None:
             return None
         if is_dir:
-            os.makedirs(t, exist_ok=True)
+            try:
+                os.makedirs(t, exist_ok=True)
+            except OSError:  # a file of that name is in the way
+                return None
             return t
+        if self.overwrite is True and self.given.get(t.lower()) == name:
+            return t  # the same member again (tar -r / -u appends updates): the later copy wins, as in ZIP
         if os.path.exists(t) or t.lower() in self.taken:
             if self.overwrite is False:
                 return None
-            if self.overwrite == "rename":
+            if self.overwrite == "rename" or t.lower() in self.taken:
                 base, ext = os.path.splitext(t)
                 i = 2
                 while os.path.exists(f"{base} ({i}){ext}") or f"{base} ({i}){ext}".lower() in self.taken:
                     i += 1
                 t = f"{base} ({i}){ext}"
         self.taken.add(t.lower())
+        self.given[t.lower()] = name
         return t
 
 
@@ -169,30 +185,49 @@ class _Counter:
     def add(self, n: int, name: str):
         self.done += n
         if self.progress:
-            self.progress(min(self.done, self.total), self.total, name)
+            # a total that turns out too small (gzip's size is kept mod 4 GiB) grows with the data
+            self.progress(self.done, max(self.total, self.done) if self.total else 0, name)
         if self.cancel and self.cancel():
             raise Cancelled()
 
 
-def _copy_out(src, target: str, counter: _Counter, name: str, mtime: Optional[float]):
+def _copy_out(src, target: str, counter: _Counter, name: str, mtime: Optional[float], later=None):
+    """Write src to target through a part file. later: a list to append (part, target, mtime) to instead of
+    putting the file in place now, for formats whose checksum only comes at the end of the whole stream."""
     os.makedirs(os.path.dirname(target), exist_ok=True)
+    part = ziplib.part_path(target)  # an existing file is replaced only by a complete new one
     try:
-        with open(target, "wb") as dst:
+        with open(part, "wb") as dst:
             while True:
                 buf = src.read(1 << 20)
                 if not buf:
                     break
                 dst.write(buf)
                 counter.add(len(buf), name)
+        if later is not None:
+            later.append((part, target, mtime))
+            return
+        ziplib.finish_part(part, target)
     except BaseException:
-        if os.path.exists(target):
-            os.remove(target)
+        if os.path.exists(part):
+            os.remove(part)
         raise
+    _set_mtime(target, mtime)
+
+
+def _set_mtime(target, mtime):
     if mtime:
         try:
             os.utime(target, (mtime, mtime))
         except (OverflowError, ValueError, OSError):
             pass
+
+
+def _local(ts) -> tuple:
+    try:
+        return time.localtime(ts)[:6]
+    except (OverflowError, OSError, ValueError):  # negative / far-future times in a tar header
+        return (1980, 1, 1, 0, 0, 0)
 
 
 class _Base:
@@ -235,6 +270,14 @@ class _TarStream:
         self.raw.close()
 
 
+def _drain(tf):
+    """Read the compressed stream past the end-of-archive blocks to its real end: gzip / bz2 / xz / zstd check
+    their CRC there, so damage anywhere in the data is reported instead of passing silently."""
+    f = tf.raw if isinstance(tf, _TarStream) else tf.fileobj
+    while f.read(1 << 20):
+        pass
+
+
 class TarArchive(_Base):
     def __init__(self, path: str):
         self.path = path
@@ -268,31 +311,41 @@ class TarArchive(_Base):
         return self._fix(m.name).rstrip("/") + ("/" if m.isdir() else "")
 
     def entries(self) -> list[Entry]:
-        return [Entry(self._name(m), m.isdir(), m.size, m.size, time.localtime(m.mtime)[:6], self.label, False, 0)
+        return [Entry(self._name(m), m.isdir(), m.size, m.size, _local(m.mtime), self.label, False, 0)
                 for m in self.members]
 
     def extract(self, dest, names=None, progress=None, cancel=None, overwrite=True):
         wanted = None if names is None else set(names)
         sel = [m for m in self.members if wanted is None or self._name(m) in wanted]
-        plan = _Planner(dest, overwrite)
+        plan = _Planner(dest, overwrite, self.path)
         counter = _Counter(sum(m.size for m in sel if m.isreg()), progress, cancel)
         chosen = {id(m) for m in sel}
         order = iter(self.members)
-        with self._open() as tf:
-            for m in tf:  # archive order: a compressed tar is only read forwards
-                if not (m.isreg() or m.isdir()):
-                    continue
-                if id(next(order)) not in chosen:
-                    continue
-                try:
-                    tarfile.data_filter(m, plan.root)  # refuses absolute / outside / special members
-                except tarfile.FilterError:
-                    continue
-                t = plan.target(self._name(m), m.isdir())
-                if t is None or m.isdir():
-                    continue
-                with tf.extractfile(m) as src:
-                    _copy_out(src, t, counter, self._name(m), m.mtime)
+        done = []  # (part, target, mtime): put in place only after the stream's own checksum passed
+        try:
+            with self._open() as tf:
+                for m in tf:  # archive order: a compressed tar is only read forwards
+                    if not (m.isreg() or m.isdir()):
+                        continue
+                    if id(next(order)) not in chosen:
+                        continue
+                    # only regular files and folders get here (no links, no devices); plan.target cleans the
+                    # name for Windows and keeps it under dest
+                    t = plan.target(self._name(m), m.isdir())
+                    if t is None or m.isdir():
+                        continue
+                    with tf.extractfile(m) as src:
+                        _copy_out(src, t, counter, self._name(m), m.mtime, done)
+                _drain(tf)
+            while done:
+                part, t, mtime = done[0]
+                ziplib.finish_part(part, t)
+                done.pop(0)
+                _set_mtime(t, mtime)
+        finally:
+            for part, _, _ in done:  # damaged, cancelled or failed: nothing half-checked is left behind
+                if os.path.exists(part):
+                    os.remove(part)
 
     def test(self, progress=None, cancel=None) -> list[str]:
         counter = _Counter(sum(m.size for m in self.members if m.isreg()), progress, cancel)
@@ -311,6 +364,8 @@ class TarArchive(_Base):
                     except Exception:
                         bad.append(m.name)
                         break  # the stream after a damaged member cannot be trusted
+                else:
+                    _drain(tf)
         except Cancelled:
             raise
         except Exception:
@@ -335,21 +390,26 @@ class StreamArchive(_Base):
         self.path, self.kind = path, kind
         self.name = stem(path) or "data"
         self.csize = os.path.getsize(path)
-        self.size = self.csize
+        self.size = 0  # unknown (bz2, zst): progress then shows bytes without a percentage
         if kind == "gz" and self.csize >= 18:  # gzip trailer keeps the size (mod 4 GiB)
             with open(path, "rb") as f:
                 f.seek(-4, 2)
                 self.size = int.from_bytes(f.read(4), "little")
+        elif kind == "xz":  # the index lists every block's unpacked size
+            try:
+                self.size = sum(b[3] for b in lzmamt.xz_blocks(path))
+            except Exception:
+                self.size = 0
         self.mtime = os.path.getmtime(path)
 
     def entries(self) -> list[Entry]:
-        return [Entry(self.name, False, self.size, self.csize, time.localtime(self.mtime)[:6], self.kind.upper(),
+        return [Entry(self.name, False, self.size or self.csize, self.csize, _local(self.mtime), self.kind.upper(),
                       False, 0)]
 
     def extract(self, dest, names=None, progress=None, cancel=None, overwrite=True):
         if names is not None and self.name not in names:
             return
-        plan = _Planner(dest, overwrite)
+        plan = _Planner(dest, overwrite, self.path)
         t = plan.target(self.name, False)
         if t is None:
             return
@@ -405,6 +465,12 @@ class SevenZArchive(_Base):
                 raise BadPassword(str(e))
             raise
 
+    joined = None  # temp file of a split archive's volumes, removed on close
+
+    def close(self):
+        if self.joined and os.path.exists(self.joined):
+            os.remove(self.joined)
+
     def _header_encrypted(self, py7zr) -> bool:
         try:
             with py7zr.SevenZipFile(self.path):
@@ -443,23 +509,28 @@ class SevenZArchive(_Base):
     def extract(self, dest, names=None, progress=None, cancel=None, overwrite=True):
         from py7zr.io import NullIO, Py7zIO, WriterFactory
         wanted = None if names is None else set(names)
-        sel = [fi for fi in self.infos if wanted is None or self._name(fi) in wanted]
-        plan = _Planner(dest, overwrite)
-        targets = {}
-        for fi in sel:
+        plan = _Planner(dest, overwrite, self.path)
+        targets = {}  # position in the archive's file list -> (target, info); names may repeat
+        for k, fi in enumerate(self.infos):
+            if wanted is not None and self._name(fi) not in wanted:
+                continue
             t = plan.target(fi.filename, fi.is_directory)
             if t and not fi.is_directory:
-                targets[fi.filename] = (t, fi)
+                targets[k] = (t, fi)
         if not targets:
             return
+        by_name: dict[str, list] = {}  # py7zr's fallback only knows names: repeated ones are taken in order
+        for k, (t, fi) in sorted(targets.items()):
+            by_name.setdefault(fi.filename, []).append(k)
         counter = _Counter(sum(fi.uncompressed or 0 for _, fi in targets.values()), progress, cancel)
-        opened: dict[str, object] = {}
+        opened: dict[int, object] = {}
 
         class Out(Py7zIO):
             def __init__(self, name, path):
                 self.name, self.path = name, path
                 os.makedirs(os.path.dirname(path), exist_ok=True)
-                self.f = open(path, "w+b")
+                self.part = ziplib.part_path(path)  # moved over the target only when the whole archive succeeded
+                self.f = open(self.part, "w+b")
                 self.n = 0
 
             def write(self, s):
@@ -484,22 +555,17 @@ class SevenZArchive(_Base):
                 if not self.f.closed:
                     self.f.close()
 
+        def make(k):
+            old = opened.pop(k, None)
+            if old is not None:
+                old.close()
+            w = opened[k] = Out(targets[k][1].filename, targets[k][0])
+            return w
+
         class Factory(WriterFactory):
             def create(self, filename):
-                hit = targets.get(filename)
-                if hit is None:
-                    return NullIO()
-                w = Out(filename, hit[0])
-                opened[filename] = w
-                return w
-
-        def fast_out(fi):
-            hit = targets.get(fi.filename)
-            if hit is None:
-                return None
-            w = Out(fi.filename, hit[0])
-            opened[fi.filename] = w
-            return w
+                ks = by_name.get(filename)
+                return make(ks.pop(0)) if ks else NullIO()
 
         def go(py7zr):
             with py7zr.SevenZipFile(self.path, password=self.password) as z:
@@ -508,23 +574,30 @@ class SevenZArchive(_Base):
                 except lzmamt.Unsupported:
                     folders = None
                 if folders is None:  # unusual coder layout: py7zr's own (single-threaded) decoder
-                    z.extract(targets=list(targets), factory=Factory())
+                    z.extract(targets=list(by_name), factory=Factory())
+                # ArchiveFile objects are made afresh on every access; .id is their stable position, in the order
+                # of self.infos (z.list())
+                pos = {f.id: k for k, f in enumerate(z.files)}
             if folders is not None:  # Out counts progress itself; the sink only reports via the counter
-                lzmamt.fast_extract(self.path, folders, self.password, fast_out, _NoCount())
+                lzmamt.fast_extract(self.path, folders, self.password,
+                                    lambda fi: make(pos[fi.id]) if pos.get(fi.id) in targets else None, _NoCount())
         try:
             self._run(go)
+            for k, (t, fi) in targets.items():
+                w = opened.get(k)
+                if w is None:  # empty members get no writer
+                    open(t, "wb").close()
+                else:
+                    w.close()
+                    ziplib.finish_part(w.part, t)
+                    del opened[k]
         except BaseException:
-            for w in opened.values():  # never leave half-written files behind
+            for w in opened.values():  # never leave half-written files behind; existing files stay as they were
                 w.close()
-                if os.path.exists(w.path):
-                    os.remove(w.path)
+                if os.path.exists(w.part):
+                    os.remove(w.part)
             raise
-        for fname, (t, fi) in targets.items():
-            w = opened.get(fname)
-            if w is None:  # empty members get no writer
-                open(t, "wb").close()
-            else:
-                w.close()
+        for k, (t, fi) in targets.items():
             if fi.creationtime:
                 ts = fi.creationtime.timestamp()
                 try:
@@ -543,8 +616,9 @@ class SevenZArchive(_Base):
                 except lzmamt.Unsupported:
                     bad = z.testzip()
                     return [bad] if bad else []
+            counter = _Counter(sum(fi.uncompressed or 0 for fi in self.infos), progress, cancel)  # also cancels
             try:
-                lzmamt.fast_extract(self.path, folders, self.password, lambda fi: _Discard(), _NoCount())
+                lzmamt.fast_extract(self.path, folders, self.password, lambda fi: _Discard(), counter)
             except (ValueError, lzma.LZMAError) as e:
                 if self.need:
                     raise BadPassword(str(e))
@@ -552,7 +626,7 @@ class SevenZArchive(_Base):
             return []
         try:
             bad = self._run(go)
-        except BadPassword:
+        except (BadPassword, Cancelled):
             raise
         except Exception:
             bad = [os.path.basename(self.path)]
@@ -579,6 +653,7 @@ class _Reader:
 def _zstd_options(level: int):
     lv = max(1, round(1 + (level - 1) * 18 / 8))  # 1..9 -> zstd 1..19
     return {zstd.CompressionParameter.compression_level: lv,
+            zstd.CompressionParameter.checksum_flag: 1,  # without it no reader can detect damaged data
             zstd.CompressionParameter.nb_workers: min(os.cpu_count() or 2, 16)}
 
 

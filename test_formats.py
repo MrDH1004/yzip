@@ -280,5 +280,161 @@ class MultiBlockTests(unittest.TestCase):
                 self.assertTrue(self.fast, "Bandizip's 7z layout fell back to py7zr")
 
 
+class SafetyTests(unittest.TestCase):
+    """Failed or cancelled extraction never damages what is already on disk."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def mine(self, folder, name="x.txt", data=b"PRECIOUS"):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, name), "wb") as f:
+            f.write(data)
+
+    def test_7z_wrong_password_keeps_existing_file(self):
+        import py7zr
+        arc = os.path.join(self.root, "e.7z")
+        with py7zr.SevenZipFile(arc, "w", password="right", header_encryption=False) as z:
+            z.writestr(b"NEW " * 1000, "x.txt")
+        out = os.path.join(self.root, "o")
+        self.mine(out)
+        with formats.open_any(arc, "wrong") as z:
+            with self.assertRaises(ziplib.BadPassword):
+                z.extract(out)
+        self.assertEqual(open(os.path.join(out, "x.txt"), "rb").read(), b"PRECIOUS")
+        self.assertEqual(os.listdir(out), ["x.txt"])
+
+    def test_7z_duplicate_names_both_kept(self):
+        import py7zr
+        arc = os.path.join(self.root, "d.7z")
+        # plain LZMA2 (the layout 7-Zip/Bandizip/yzip write) goes through yzip's own reader; py7zr's default adds
+        # BCJ, falls back to py7zr, and py7zr itself hands a repeated name out only once
+        with py7zr.SevenZipFile(arc, "w", filters=[{"id": py7zr.FILTER_LZMA2}]) as z:
+            z.writestr(b"FIRST", "x.txt")
+            z.writestr(b"SECOND", "x.txt")
+        out = os.path.join(self.root, "o")
+        with formats.open_any(arc) as z:
+            z.extract(out, overwrite="rename")
+        got = {n: open(os.path.join(out, n), "rb").read() for n in os.listdir(out)}
+        self.assertEqual(got, {"x.txt": b"FIRST", "x (2).txt": b"SECOND"})
+
+    def test_truncated_gz_keeps_existing_file(self):
+        import gzip
+        arc = os.path.join(self.root, "x.txt.gz")
+        with gzip.open(arc, "wb") as f:
+            f.write(os.urandom(200_000))
+        with open(arc, "r+b") as f:
+            f.truncate(50_000)
+        out = os.path.join(self.root, "o")
+        self.mine(out)
+        with formats.open_any(arc) as z:
+            with self.assertRaises(Exception):
+                z.extract(out)
+        self.assertEqual(open(os.path.join(out, "x.txt"), "rb").read(), b"PRECIOUS")
+
+    def test_stream_never_unpacks_onto_itself(self):
+        import gzip
+        arc = os.path.join(self.root, "backup")  # gzip without an extension: its stem is its own name
+        with gzip.open(arc, "wb") as f:
+            f.write(b"payload")
+        size = os.path.getsize(arc)
+        with formats.open_any(arc) as z:
+            z.extract(self.root)
+        self.assertEqual(os.path.getsize(arc), size)
+        self.assertEqual(open(os.path.join(self.root, "backup (2)"), "rb").read(), b"payload")
+
+    def test_240_char_names_extract_everywhere(self):
+        src = os.path.join(self.root, "s")
+        os.makedirs(src)
+        name = "n" * 236 + ".txt"
+        with open(os.path.join(src, name), "wb") as f:
+            f.write(b"long")
+        for fid in ("zip", "7z", "tgz"):
+            out_arc = os.path.join(self.root, "a" + formats.BY_ID[fid].ext)
+            formats.create(fid, [src], out_arc)
+            dest = os.path.join(self.root, "x_" + fid)
+            with formats.open_any(out_arc) as z:
+                z.extract(dest)
+            self.assertEqual(open(os.path.join(dest, "s", name), "rb").read(), b"long", fid)
+
+    def test_damaged_tgz_is_reported(self):
+        src = os.path.join(self.root, "s")
+        os.makedirs(src)
+        with open(os.path.join(src, "r.bin"), "wb") as f:
+            f.write(os.urandom(300_000))  # incompressible: a flipped byte lands in stored data, not in tar headers
+        arc = os.path.join(self.root, "a.tar.gz")
+        formats.create("tgz", [src], arc)
+        with open(arc, "r+b") as f:
+            f.seek(os.path.getsize(arc) // 2)
+            b = f.read(1)
+            f.seek(-1, 1)
+            f.write(bytes([b[0] ^ 0xFF]))
+        try:
+            with formats.open_any(arc) as z:
+                bad = z.test()
+        except Exception:
+            bad = ["raised"]
+        self.assertTrue(bad, "a damaged tar.gz passed the test")
+
+    def test_zst_has_a_checksum(self):
+        if "zst" not in formats.BY_ID:
+            self.skipTest("no zstd")
+        f = os.path.join(self.root, "x.bin")
+        with open(f, "wb") as fh:
+            fh.write(b"z" * 1000)
+        arc = os.path.join(self.root, "x.bin.zst")
+        formats.create("zst", [f], arc)
+        with open(arc, "rb") as fh:
+            self.assertTrue(fh.read(5)[4] & 0x04, "zstd content checksum flag")
+
+    def test_split_7z_volumes(self):
+        src = os.path.join(self.root, "s")
+        os.makedirs(src)
+        data = os.urandom(250_000)
+        with open(os.path.join(src, "r.bin"), "wb") as f:
+            f.write(data)
+        arc = os.path.join(self.root, "v.7z")
+        formats.create("7z", [src], arc)
+        blob = open(arc, "rb").read()
+        for i in range(0, len(blob), 100_000):  # volumes as 7-Zip / Bandizip name them
+            with open(f"{arc}.{i // 100_000 + 1:03d}", "wb") as f:
+                f.write(blob[i:i + 100_000])
+        self.assertEqual(formats.detect(arc + ".001"), "7z")
+        dest = os.path.join(self.root, "x")
+        with formats.open_any(arc + ".001") as z:
+            z.extract(dest)
+            joined = z.joined
+        self.assertFalse(os.path.exists(joined))
+        self.assertEqual(open(os.path.join(dest, "s", "r.bin"), "rb").read(), data)
+
+    def test_cancelled_7z_test_is_not_damage(self):
+        src = os.path.join(self.root, "s")
+        os.makedirs(src)
+        with open(os.path.join(src, "r.bin"), "wb") as f:
+            f.write(os.urandom(3 << 20))
+        arc = os.path.join(self.root, "c.7z")
+        formats.create("7z", [src], arc)
+        with formats.open_any(arc) as z:
+            with self.assertRaises(ziplib.Cancelled):
+                z.test(cancel=lambda: True)
+
+    def test_hostile_tar_names(self):
+        arc = os.path.join(self.root, "h.tar")
+        with tarfile.open(arc, "w") as t:
+            for n in ("Z:evil.txt", "a.txt:ads", "good.txt"):
+                info = tarfile.TarInfo(n)
+                info.size = 2
+                t.addfile(info, io.BytesIO(b"ok"))
+        out = os.path.join(self.root, "o")
+        with formats.open_any(arc) as z:
+            z.extract(out)
+        self.assertIn("good.txt", os.listdir(out))
+        self.assertIn("a.txt_ads", os.listdir(out))
+
+
 if __name__ == "__main__":
     unittest.main()

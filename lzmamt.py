@@ -9,6 +9,7 @@ own multi-threaded encoders work, so any reader decodes the result as one ordina
 from __future__ import annotations
 
 import collections
+import functools
 import hashlib
 import lzma
 import os
@@ -195,6 +196,8 @@ def xz_blocks(path: str):
                     continue
                 raise Unsupported("not xz")
             flags = head[6:8]
+            if zlib.crc32(flags) != struct.unpack("<I", head[8:12])[0]:
+                raise ValueError("xz stream header damaged")  # open_xz then lets liblzma report it
             check = {0: 0, 1: 4, 4: 8, 10: 32}.get(flags[1] & 0x0F)
             if check is None:
                 raise Unsupported("check type")
@@ -255,7 +258,10 @@ class XZReader:
         self._fill()
 
     def _decode(self, args):
-        return lzma.decompress(_xz_mini_stream(*args))
+        out = lzma.decompress(_xz_mini_stream(*args))
+        if len(out) != args[3]:  # the index's size for this block: a damaged block must not pass short
+            raise lzma.LZMAError("xz block size does not match the index")
+        return out
 
     def _fill(self):
         while self.blocks and len(self.pending) < self.workers * 2 and self.held < _INFLIGHT:
@@ -299,7 +305,8 @@ def open_xz(path: str):
         blocks = xz_blocks(path)
     except (Unsupported, ValueError, IndexError, OSError):
         blocks = None
-    if not blocks or len(blocks) < 2:
+    # a block is decoded in one piece in memory: huge (or crafted) blocks go through the streaming reader
+    if not blocks or len(blocks) < 2 or max(b[3] for b in blocks) > _SEG_CAP:
         return lzma.open(path, "rb")
     return XZReader(path, blocks)
 
@@ -325,7 +332,9 @@ def fast_plan(z) -> list[dict]:
     files = [f for f in z.files if not f.emptystream]
     counts = ss.num_unpackstreams_folders if ss else [1] * ui.numfolders
     sizes = ss.unpacksizes if ss else None
-    digests = iter(ss.digests if ss and ss.digests else [])
+    # py7zr lines digests up with the substreams; digestsdefined says which ones a CRC was stored for
+    digests = list(ss.digests or []) if ss else []
+    defined = list(getattr(ss, "digestsdefined", None) or [True] * len(digests)) if ss else []
     out, fi, si = [], 0, 0
     for i, fo in enumerate(ui.folders):
         ids = [c["method"] for c in fo.coders]
@@ -343,8 +352,11 @@ def fast_plan(z) -> list[dict]:
         members = []
         for k in range(n):
             size = sizes[si] if sizes is not None else fo.unpacksizes[-1]
+            if si < len(digests) and si < len(defined) and defined[si]:
+                crc = digests[si]
+            else:
+                crc = fo.crc if n == 1 and fo.digestdefined else None
             si += 1
-            crc = fo.crc if n == 1 and fo.digestdefined else next(digests, None)
             members.append((files[fi], size, crc))
             fi += 1
         out.append({"offset": z.afterheader + pi.packpos + pi.packpositions[i], "packsize": pi.packsizes[i],
@@ -363,6 +375,8 @@ def _aes_reader(f, size, coded, props, password):
     salt, iv = props[2:2 + salt_n], props[2 + salt_n:2 + salt_n + iv_n].ljust(16, b"\0")
     if cycles == 0x3F:
         raise Unsupported("raw aes key")
+    if cycles > 24:  # 7-Zip's own limit; 2^40 rounds would hang the reader
+        raise ValueError("7z AES key derivation too costly (NumCyclesPower > 24)")
     from Cryptodome.Cipher import AES
     c = AES.new(aes_key(password, salt, cycles), AES.MODE_CBC, iv)
     left, out = size, coded
@@ -505,12 +519,17 @@ def fast_extract(path: str, folders: list[dict], password, open_out, counter) ->
                 held = 0
                 stream = None
 
-                def job(piece):
-                    return lzma.decompress(piece + b"\x00", lzma.FORMAT_RAW, filters=filters)
+                def job(piece, usize):
+                    # a piece starts with a dictionary reset, so it never looks further back than its own
+                    # output: a dictionary of that size decodes it and keeps parallel jobs from each reserving
+                    # the header's (up to 1.5 GiB) dictionary
+                    small = [{"id": lzma.FILTER_LZMA2,
+                              "dict_size": min(filters[0]["dict_size"], max(usize, 1 << 12))}]
+                    return lzma.decompress(piece + b"\x00", lzma.FORMAT_RAW, filters=small)
 
                 for piece, usize, fresh, complete in _segments(_Buf(read)):
                     if fresh and complete:
-                        pending.append((pool.submit(job, piece), usize))
+                        pending.append((pool.submit(job, piece, usize), usize))
                         held += usize
                         while pending and (len(pending) > workers or held > _INFLIGHT):
                             fut, u = pending.popleft()
@@ -553,6 +572,7 @@ def _bits(flags) -> bytes:
     return bytes(out)
 
 
+@functools.lru_cache(maxsize=8)  # every folder of an archive uses the same key: derive it once
 def aes_key(password: str, salt: bytes = b"", cycles: int = _AES_CYCLES) -> bytes:
     pw = salt + password.encode("utf-16-le")
     h = hashlib.sha256()

@@ -54,10 +54,61 @@ def fix_name(info: zipfile.ZipInfo) -> str:
         return info.filename
 
 
+_BAD_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+_DEVICES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def _safe_part(p: str) -> str:
+    """One path component made writable on Windows: no ':' (alternate data streams, drive letters), no reserved
+    characters, no trailing dots/spaces (Windows drops them, so 'a.' would overwrite 'a'), no device names,
+    at most 240 characters (NTFS allows 255; the extension is kept)."""
+    p = _BAD_CHARS.sub("_", p).rstrip(" .")
+    if p.split(".")[0].strip().upper() in _DEVICES:
+        p = "_" + p
+    if len(p) > 240:
+        stem, ext = os.path.splitext(p)
+        ext = ext if len(ext) <= 20 else ""
+        p = stem[:240 - len(ext)].rstrip(" .") + ext
+    return p
+
+
+def part_path(target: str) -> str:
+    """Temporary name next to target for writing it; short, so a 240-character name still fits."""
+    import secrets
+    return os.path.join(os.path.dirname(target), f"~yzip{secrets.token_hex(4)}.part")
+
+
+def finish_part(part: str, target: str):
+    """Put a completely written part file in place of target (an existing read-only file is replaced too)."""
+    try:
+        os.replace(part, target)
+    except PermissionError:
+        if not os.path.isfile(target):
+            raise
+        import stat
+        os.chmod(target, stat.S_IWRITE)
+        os.replace(part, target)
+
+
 def _safe_rel(name: str) -> str:
+    """Archive member name -> relative path inside the destination ('' = nothing to write)."""
     name = name.replace("\\", "/")
-    parts = [p for p in name.split("/") if p not in ("", ".", "..")]
-    return "/".join(parts)
+    parts = [_safe_part(p) for p in name.split("/") if p not in ("", ".", "..")]
+    return "/".join(p for p in parts if p)
+
+
+def safe_target(root: str, name: str) -> Optional[str]:
+    """Absolute path for a member under root (a realpath), or None when the name points outside it."""
+    rel = _safe_rel(name)
+    if not rel:
+        return None
+    target = os.path.realpath(os.path.join(root, *rel.split("/")))
+    try:
+        if os.path.commonpath([root, target]) != root:  # zip-slip guard (also a symlinked folder inside root)
+            return None
+    except ValueError:  # another drive
+        return None
+    return target
 
 
 # ---------- split volumes (name.zip.001, .002 ...) ----------
@@ -83,7 +134,16 @@ def join_split(first_part: str) -> str:
     return tmp
 
 
+def _remove_stale_volumes(path: str, first: int):
+    """Delete path.NNN volumes from an earlier, longer split: readers join volumes while numbers continue."""
+    i = first
+    while os.path.exists(f"{path}.{i:03d}"):
+        os.remove(f"{path}.{i:03d}")
+        i += 1
+
+
 def split_file(path: str, volume_size: int) -> list[str]:
+    _remove_stale_volumes(path, 1)
     parts = []
     with open(path, "rb") as src:
         i = 1
@@ -113,7 +173,12 @@ class Archive:
         self._real = real
         global pyzipper
         import pyzipper  # ~75 ms (Cryptodome, cffi): only reading needs it, not the right-click compress path
-        self.zf = pyzipper.AESZipFile(real)
+        try:
+            self.zf = pyzipper.AESZipFile(real)
+        except BaseException:
+            if self._tmp:
+                os.remove(self._tmp)
+            raise
         self._names = {fix_name(i): i for i in self.zf.infolist()}
         self.set_password(password)
 
@@ -190,11 +255,8 @@ class Archive:
             return f"{base} ({i}){ext}"
         for n in sel:
             info = self._names[n]
-            rel = _safe_rel(n)
-            if not rel:
-                continue
-            target = os.path.realpath(os.path.join(root, *rel.split("/")))
-            if os.path.commonpath([root, target]) != root:  # zip-slip guard
+            target = safe_target(root, n)
+            if target is None:
                 continue
             if info.is_dir():
                 os.makedirs(target, exist_ok=True)
@@ -263,6 +325,8 @@ class Archive:
                     if out:
                         crc = zlib.crc32(out, crc)
                         size += len(out)
+                        if size > info.file_size:  # more than the header declares: corrupt or a zip bomb
+                            raise zipfile.BadZipFile(f"size mismatch: {info.filename}")
                         yield out
             if dec:
                 out = dec.flush()
@@ -280,8 +344,9 @@ class Archive:
             if cancel and cancel():
                 raise Cancelled()
             os.makedirs(os.path.dirname(target), exist_ok=True)
+            part = part_path(target)  # an existing file is replaced only once the new one is complete
             try:
-                with open(target, "wb") as dst:
+                with open(part, "wb") as dst:
                     for buf in chunks(info):
                         dst.write(buf)
                         with lock:
@@ -291,12 +356,12 @@ class Archive:
                             progress(d, total, n)
                         if stop.is_set() or (cancel and cancel()):
                             raise Cancelled()
-            except (RuntimeError, zipfile.BadZipFile, pyzipper.BadZipFile, Cancelled) as e:
-                if os.path.exists(target):
-                    os.remove(target)
-                if isinstance(e, Cancelled):
-                    raise
-                if info.flag_bits & 1 and ("password" in str(e).lower() or "Bad" in str(e)):
+                finish_part(part, target)
+            except BaseException as e:
+                if os.path.exists(part):
+                    os.remove(part)
+                if isinstance(e, (RuntimeError, zipfile.BadZipFile, pyzipper.BadZipFile)) and info.flag_bits & 1 \
+                        and ("password" in str(e).lower() or "Bad" in str(e)):
                     raise BadPassword(str(e))  # only an encrypted member can fail because of the password
                 raise
             try:
@@ -305,6 +370,8 @@ class Archive:
             except (OverflowError, ValueError, OSError):
                 pass
 
+        # names that differ only in case land on the same Windows file: keep the last, never write it twice at once
+        jobs = list({t.lower(): (n, i, t) for n, i, t in jobs}.values())
         workers = max(1, min(os.cpu_count() or 2, 8, len(jobs)))
         try:
             with ThreadPoolExecutor(workers) as pool:
@@ -395,3 +462,72 @@ def create_zip(paths: Iterable[str], out_path: str, level: int = 6, password: Op
     if split_size and os.path.getsize(out_path) > split_size:
         return split_file(out_path, split_size)
     return [out_path]
+
+
+def _under(name: str, prefix: str) -> bool:
+    p = prefix.rstrip("/")
+    return name.rstrip("/") == p or name.startswith(p + "/")
+
+
+def edit_zip(path: str, drop: Iterable[str] = (), renames: Optional[dict] = None, add: Iterable[str] = (),
+             password: Optional[str] = None, level: int = 6, store_only: bool = False,
+             progress: Optional[Progress] = None, cancel: Optional[Callable[[], bool]] = None,
+             into: str = "") -> None:
+    """Delete / rename / add entries of a zip in place. Kept entries are copied byte for byte (names, encryption,
+    times stay as they were, nothing is decompressed), so no entry is lost even if its name cannot exist on
+    Windows. drop / renames take entry names or folder names (a folder covers everything under it). Added files
+    replace entries of the same name; they are encrypted with `password` when one is given. into: folder inside
+    the archive ("a/b/") the added files go to."""
+    if is_split_first(path):
+        raise ValueError("분할 압축은 수정할 수 없습니다. 먼저 하나로 합쳐 주세요.")
+    drop, renames = list(drop), dict(renames or {})
+    into = into.strip("/") + "/" if into.strip("/") else ""
+    items = [(p, into + n) for p, n in collect_items(add)] if add else []
+    new_names = {n for _, n in items}
+    with zipfile.ZipFile(path) as zf:
+        infos = zf.infolist()
+    secret = [i for i in infos if i.flag_bits & 1 and not i.is_dir()]
+    if items and secret:  # new files join an encrypted archive: only with its (checked) password
+        if not password:
+            raise BadPassword("password required")
+        with Archive(path, password) as a:
+            probe = min(secret, key=lambda i: i.compress_size)
+            try:
+                with a.zf.open(probe.filename) as f:  # by name: pyzipper has its own ZipInfo objects
+                    while f.read(1 << 20):
+                        pass
+            except (RuntimeError, zipfile.BadZipFile, pyzipper.BadZipFile) as e:
+                raise BadPassword(str(e))
+    keep = []
+    for info in infos:
+        name = fix_name(info)
+        if any(_under(name, d) for d in drop):
+            continue
+        for old, new in renames.items():
+            if _under(name, old):
+                name = new.rstrip("/") + name[len(old.rstrip("/")):]
+                break
+        if name in new_names:
+            continue
+        keep.append((info, name))
+    if renames:  # a rename must not land on a name that stays: two entries of one name, one hidden
+        before = {}
+        for info in infos:
+            before.setdefault(fix_name(info).rstrip("/"), []).append(info)
+        after = {}
+        for info, name in keep:
+            after.setdefault(name.rstrip("/"), []).append(info)
+        folders = {n.rsplit("/", i)[0] for n in after for i in range(1, n.count("/") + 1)}
+        for name, group in after.items():
+            if len(group) > max(len(before.get(name, [])), 1) or \
+                    (name in folders and any(not i.is_dir() for i in group) and name not in before):
+                raise ValueError(f"이미 있는 이름입니다: {name}")
+    tmp_out = path + ".partial"
+    try:
+        zipwriter.write_zip(items, tmp_out, level, store_only, progress, cancel, password=password or None,
+                            copy=(path, keep))
+        os.replace(tmp_out, path)
+    except BaseException:
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+        raise

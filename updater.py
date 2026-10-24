@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -28,8 +29,8 @@ def api_url() -> str:
 
 
 def parse_version(s: str) -> tuple:
-    nums = re.findall(r"\d+", s or "")
-    return tuple(int(n) for n in nums[:3]) if nums else (0,)
+    nums = [int(n) for n in re.findall(r"\d+", s or "")[:3]]
+    return tuple(nums + [0] * (3 - len(nums)))  # "1.1" == "1.1.0"
 
 
 @dataclass
@@ -60,6 +61,8 @@ def check(current: str = __version__) -> Optional[Release]:
     setup = next((n for n in assets if re.fullmatch(r"yzip-setup-[\d.]+\.exe", n)), None)
     if not setup or setup + ".sha256" not in assets:
         return None  # a release without a verifiable installer is not offered
+    if parse_version(setup) != parse_version(tag):
+        return None  # installer of another version under this tag: never downgrade by accident
     return Release(tag.lstrip("v"), assets[setup], assets[setup + ".sha256"], setup,
                    data.get("body") or "", data.get("html_url") or "")
 
@@ -67,27 +70,31 @@ def check(current: str = __version__) -> Optional[Release]:
 def download(rel: Release, progress: Optional[Callable[[int, int, str], None]] = None,
              cancel: Optional[Callable[[], bool]] = None) -> str:
     """Installer into a fresh temp folder, verified against the published SHA-256. Returns its path."""
-    want = _get(rel.sha_url).decode("ascii", "replace").split()[0].lower()
+    words = _get(rel.sha_url).decode("ascii", "replace").split()
+    want = words[0].lower() if words else ""
     if not re.fullmatch(r"[0-9a-f]{64}", want):
         raise ValueError("업데이트 파일의 체크섬 형식이 올바르지 않습니다.")
     folder = tempfile.mkdtemp(prefix="yzip_update_")
     path = os.path.join(folder, rel.name)
     req = urllib.request.Request(rel.url, headers={"User-Agent": UA})
     h = hashlib.sha256()
-    with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        while chunk := r.read(1 << 16):
-            if cancel and cancel():
-                raise InterruptedError("cancelled")
-            f.write(chunk)
-            h.update(chunk)
-            done += len(chunk)
-            if progress:
-                progress(done, total, rel.name)
-    if h.hexdigest() != want:
-        os.remove(path)
-        raise ValueError("다운로드한 업데이트 파일이 손상되었거나 변조되었습니다 (SHA-256 불일치).")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while chunk := r.read(1 << 16):
+                if cancel and cancel():
+                    raise InterruptedError("cancelled")
+                f.write(chunk)
+                h.update(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total, rel.name)
+        if h.hexdigest() != want:
+            raise ValueError("다운로드한 업데이트 파일이 손상되었습니다 (SHA-256 불일치).")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)  # no half-downloaded installer left in temp
+        raise
     return path
 
 

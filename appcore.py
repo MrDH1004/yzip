@@ -19,7 +19,8 @@ def settings_path() -> str:
 def load_settings() -> dict:
     try:
         with open(settings_path(), encoding="utf-8") as f:
-            return json.load(f)
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -29,8 +30,10 @@ def save_setting(key: str, value):
     s[key] = value
     try:
         os.makedirs(os.path.dirname(settings_path()), exist_ok=True)
-        with open(settings_path(), "w", encoding="utf-8") as f:
+        tmp = f"{settings_path()}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(s, f)
+        os.replace(tmp, settings_path())  # a crash or a second yzip never leaves a half-written file
     except OSError:
         pass
 
@@ -105,7 +108,8 @@ def read_list(path: str) -> list[str]:
     """The shell extension's UTF-8 list of selected items; the file is deleted after reading."""
     try:
         with open(path, encoding="utf-8") as f:
-            return [ln for ln in f.read().splitlines() if ln]
+            # split on \n only: splitlines() also breaks at U+2028/U+0085, which are legal in file names
+            return [ln.rstrip("\r") for ln in f.read().split("\n") if ln.strip("\r")]
     finally:
         try:
             os.remove(path)

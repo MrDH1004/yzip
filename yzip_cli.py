@@ -8,7 +8,6 @@ import re
 import shutil
 import sys
 import tempfile
-import zipfile
 
 import formats
 import ziplib
@@ -29,27 +28,6 @@ def _bar(done, total, name):
     pct = int(done * 100 / total) if total else 100
     sys.stdout.write(f"\r{pct:3d}%  {name[-60:]:<60}")
     sys.stdout.flush()
-
-
-def _rewrite(src: str, keep) -> None:
-    """Rebuild a zip keeping/renaming entries; keep(info)->new name or None to drop."""
-    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=os.path.dirname(os.path.abspath(src)))
-    os.close(fd)
-    try:
-        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-            for info in zin.infolist():
-                new = keep(info)
-                if new is None:
-                    continue
-                data = zin.read(info)
-                ni = zipfile.ZipInfo(new, info.date_time)
-                ni.compress_type = info.compress_type
-                ni.external_attr = info.external_attr
-                zout.writestr(ni, data)
-        os.replace(tmp, src)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
 
 
 def build_parser():
@@ -81,10 +59,8 @@ def main(argv=None) -> int:
             if not a.files:
                 print("no input files", file=sys.stderr)
                 return 2
-            if cmd == "c" and os.path.exists(a.archive):
-                os.remove(a.archive)
             files = a.files
-            if cmd == "a" and os.path.exists(a.archive):
+            if cmd == "a" and os.path.exists(a.archive):  # "c" replaces the archive once the new one is complete
                 return _add_existing(a)
             level = 0 if a.level == 0 else max(1, min(9, a.level))
             parts = formats.create(a.fmt if cmd == "c" else "zip", files, a.archive, level=max(1, level),
@@ -95,7 +71,7 @@ def main(argv=None) -> int:
                 if cmd == "x":
                     z.extract(a.out, a.files or None, progress=_bar, overwrite={"all": True, "skip": False, "rename": "rename"}[a.ow])
                 else:
-                    _extract_flat(z, a.out, a.files or None)
+                    _extract_flat(z, a.out, a.files or None, a.ow)
             print("\ndone")
         elif cmd == "t":
             with formats.open_any(a.archive, a.password) as z:
@@ -107,15 +83,13 @@ def main(argv=None) -> int:
                 for e in z.entries():
                     print(f"{e.size:>12} {e.csize:>12} {e.method:<8} {'*' if e.encrypted else ' '} {e.name}")
         elif cmd == "d":
-            targets = set(a.files)
-            _rewrite(a.archive, lambda i: None if ziplib.fix_name(i) in targets else i.filename)
+            ziplib.edit_zip(a.archive, drop=a.files)
             print("deleted")
         elif cmd == "rn":
             if len(a.files) % 2:
                 print("rn needs pairs: old new [old new ...]", file=sys.stderr)
                 return 2
-            mapping = dict(zip(a.files[::2], a.files[1::2]))
-            _rewrite(a.archive, lambda i: mapping.get(ziplib.fix_name(i), i.filename))
+            ziplib.edit_zip(a.archive, renames=dict(zip(a.files[::2], a.files[1::2])))
             print("renamed")
     except ziplib.BadPassword:
         print("wrong or missing password", file=sys.stderr)
@@ -126,34 +100,50 @@ def main(argv=None) -> int:
     except ValueError as e:  # format rules, e.g. a single-file format given a folder
         print(str(e), file=sys.stderr)
         return 2
+    except ziplib.Cancelled:
+        return 130
+    except Exception as e:  # corrupt archive, disk full, ...: a message, not a traceback
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
 def _add_existing(a) -> int:
-    """Append files to an existing archive by rebuilding (keeps old entries)."""
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        with ziplib.Archive(a.archive, a.password) as z:
-            z.extract(tmp_dir)
-        roots = [os.path.join(tmp_dir, n) for n in os.listdir(tmp_dir)] + list(a.files)
-        ziplib.create_zip(roots, a.archive, level=max(1, a.level), password=a.password,
-                          store_only=a.level == 0, progress=_bar)
-        print("\nupdated")
-        return 0
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    """Add files to an existing zip: old entries are copied as they are, same names are replaced."""
+    if not formats.is_zip(a.archive):
+        print("a: adding to an existing archive works for ZIP only", file=sys.stderr)
+        return 2
+    ziplib.edit_zip(a.archive, add=a.files, password=a.password, level=max(1, a.level),
+                    store_only=a.level == 0, progress=_bar)
+    print("\nupdated")
+    return 0
 
 
-def _extract_flat(z, out, names):
+def _extract_flat(z, out, names, ow="all"):
+    """e: every file straight into out (no folders). Each one is extracted into a private temp folder first and
+    moved from where the extractor actually wrote it, so a hostile name cannot point the move elsewhere."""
+    out = os.path.realpath(out)
     os.makedirs(out, exist_ok=True)
     for e in z.entries():
         if e.is_dir or (names and e.name not in names):
             continue
-        tmp = tempfile.mkdtemp()
+        tmp = os.path.realpath(tempfile.mkdtemp())
         try:
             z.extract(tmp, [e.name])
-            src = os.path.join(tmp, *e.name.replace("\\", "/").split("/"))
-            shutil.move(src, os.path.join(out, os.path.basename(e.name)))
+            src = ziplib.safe_target(tmp, e.name)
+            if src is None or not os.path.isfile(src):
+                continue
+            dst = os.path.join(out, os.path.basename(src))
+            if os.path.exists(dst):
+                if ow == "skip":
+                    continue
+                if ow == "rename":
+                    base, ext = os.path.splitext(dst)
+                    i = 2
+                    while os.path.exists(f"{base} ({i}){ext}"):
+                        i += 1
+                    dst = f"{base} ({i}){ext}"
+            shutil.move(src, dst)  # temp folder may be on another drive
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
