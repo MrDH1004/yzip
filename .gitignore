@@ -1,0 +1,20 @@
+# build output
+build/
+dist/
+shell/build/
+*.spec
+__pycache__/
+*.pyc
+
+# tool / IDE state
+.omc/
+.claude/
+.idea/
+.vscode/
+
+# local data, secrets
+*.pfx
+*.pvk
+*.key
+.env
+perf*.json
