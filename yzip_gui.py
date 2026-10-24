@@ -193,10 +193,13 @@ class ProgressWindow(QDialog):
         el = max(time.time() - self.start, 0.001)
         name = os.path.basename(n.rstrip("/")) or self.title
         name = name if len(name) <= 48 else name[:22] + "…" + name[-22:]
+        # total from the average rate so far; too noisy to show in the first second or before 1%
+        total = fmt_time(el * t / d) if d and t and el >= 1 and d * 100 >= t else "계산 중…"
+        sep = "&nbsp;&nbsp;·&nbsp;&nbsp;"
         self.label.setText(
             f"<div style='font-size:10.5pt; font-weight:600; color:#1f2328'>{escape(name)}</div>"
-            f"<div style='font-size:9pt; color:#6e7781; margin-top:3px'>{pct}%&nbsp;&nbsp;·&nbsp;&nbsp;"
-            f"{fmt_size(int(d / el))}/s&nbsp;&nbsp;·&nbsp;&nbsp;걸린 시간 {fmt_time(el)}</div>")
+            f"<div style='font-size:9pt; color:#6e7781; margin-top:3px'>{pct}%{sep}{fmt_size(int(d / el))}/s{sep}"
+            f"걸린 시간 {fmt_time(el)}{sep}예상 총 시간 {total}</div>")
 
     def show_done(self):
         from html import escape
