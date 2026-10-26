@@ -3,4 +3,4 @@ pyzipper==0.4.0
 pycryptodomex==3.24.1
 py7zr==1.1.4
 pyinstaller==6.22.3
-brotli==1.1.0
+brotli==1.2.1
