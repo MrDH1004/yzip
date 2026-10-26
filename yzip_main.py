@@ -1,10 +1,7 @@
 """Exe entry point. "<name>.zip으로 압축하기" (--archive-list LIST --out ZIP) starts compressing before Qt is
-imported (PySide6 and the GUI module take ~0.2 s to load). The progress window only appears after 0.3 s anyway,
-so a small job finishes with no Qt at all; Qt is loaded only when the job runs longer, fails, or the window
-is set to stay open ('작업 완료 후 창을 닫지 않기')."""
+imported (PySide6 and the GUI module take ~0.2 s to load), then the progress window follows the running job."""
 import os
 import sys
-import time
 
 
 def main() -> int:
@@ -23,9 +20,6 @@ def main() -> int:
                 if not paths:
                     return 0
                 job = appcore.quick_compress(paths, args[3])
-                keep = bool(appcore.load_settings().get("keep_open")) and not os.environ.get("YZIP_AUTOACCEPT")
-                if job.wait(max(0.0, 0.3 - (time.time() - job.started))) and job.ok and not keep:
-                    return 0
             except Exception as e:
                 appcore.log_exception(e)
                 raise

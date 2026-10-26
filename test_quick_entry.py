@@ -1,5 +1,5 @@
-"""yzip_main: '<name>.zip으로 압축하기' finishes small jobs without loading Qt, and hands longer or failed jobs
-to a progress window / message box. Each case runs in a fresh interpreter so 'Qt was loaded' is observable."""
+"""yzip_main: '<name>.zip으로 압축하기' starts the job before Qt loads, then every job, even a tiny one, gets the
+progress window, and a failed one a message box. Each case runs in a fresh interpreter."""
 import json
 import os
 import subprocess
@@ -13,7 +13,7 @@ DRIVER = r'''
 import json, os, sys, time
 sys.argv = ["yzip"] + json.loads(os.environ["ARGS"])
 shown = []
-if os.environ.get("SLOW"):  # a job that outlives the 0.3 s grace period
+if os.environ.get("SLOW"):  # a job of about a second
     import formats
     real = formats.create
     def slow(*a, **k):
@@ -66,10 +66,10 @@ class QuickEntryTests(unittest.TestCase):
         self.assertFalse(os.path.exists(lst), "the list file is removed")
         return json.loads(line[6:])
 
-    def test_small_job_never_loads_qt(self):
+    def test_small_job_still_shows_the_progress_window(self):
         out = os.path.join(self.root, "memo.zip")
-        res = self.run_entry(out)
-        self.assertFalse(res["loaded_qt"])
+        res = self.run_entry(out, WATCH_QT="1")
+        self.assertIn(["window", "압축하기 memo.zip"], res["shown"])
         with zipfile.ZipFile(out) as z:
             self.assertEqual(z.read("memo.txt"), b"hello " * 1000)
 
@@ -82,7 +82,7 @@ class QuickEntryTests(unittest.TestCase):
     def test_failure_is_reported(self):
         out = os.path.join(self.root, "no such dir", "x.zip")
         res = self.run_entry(out, WATCH_QT="1")
-        self.assertEqual([s[0] for s in res["shown"]], ["critical"])
+        self.assertEqual([s[0] for s in res["shown"]], ["window", "critical"])
         self.assertFalse(os.path.exists(out))
 
     def test_keep_open_setting_shows_the_window(self):

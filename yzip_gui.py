@@ -245,24 +245,27 @@ class ProgressWindow(QDialog):
             e.ignore()
 
 
+MIN_SHOWN = 0.6  # seconds a finished progress window stays visible
+
+
 def run_job(parent, title, fn, reveal=None, done_text="작업을 완료했습니다.", job=None):
     """Run fn(progress, cancelled) in a thread behind a progress window. Returns (ok, result_or_(kind, msg)).
-    reveal: path the folder button opens. The window appears after 300 ms; with '창을 닫지 않기' it stays open
-    after success until the user closes it. job: an appcore.Job already running (started before Qt was
-    loaded); the window then follows its state instead of starting a Worker."""
+    reveal: path the folder button opens. The window shows at once, also for a tiny job, and a finished one stays
+    up for MIN_SHOWN so it can be seen; with '창을 닫지 않기' it stays open after success until the user closes
+    it. job: an appcore.Job already running (started before Qt was loaded); the window then follows its state
+    instead of starting a Worker."""
     dlg = ProgressWindow(parent, title, reveal, done_text)
     dlg.setWindowModality(Qt.WindowModal)
+    dlg.show()
+    shown = time.time()
     if job is None:
         set_low_priority(dlg.low_act.isChecked())
         w = Worker(fn)
         w.progress.connect(dlg.on_progress)
         dlg.canceled.connect(w.cancel)
         w.start()
-        t0 = time.time()
         while not w.wait(30):
             QApplication.processEvents()
-            if not dlg.isVisible() and not dlg.wasCanceled() and time.time() - t0 >= 0.3:
-                dlg.show()
             if dlg.wasCanceled():
                 w.cancel()
         QApplication.processEvents()  # flush progress signals queued by the last chunk
@@ -273,8 +276,6 @@ def run_job(parent, title, fn, reveal=None, done_text="작업을 완료했습니
         while not job.wait(0.03):
             QApplication.processEvents()
             dlg.on_progress(*job.state)
-            if not dlg.isVisible() and not dlg.wasCanceled() and time.time() - job.started >= 0.3:
-                dlg.show()
         dlg.on_progress(*job.state)
         ok, result = job.ok, job.result
     if ok and dlg.keep_btn.isChecked() and not os.environ.get("YZIP_AUTOACCEPT"):
@@ -284,6 +285,12 @@ def run_job(parent, title, fn, reveal=None, done_text="작업을 완료했습니
         dlg.finished.connect(loop.quit)
         if dlg.isVisible():
             loop.exec()
+    elif ok:  # a job done in a blink still shows its full bar for a moment instead of a flicker
+        dlg.bar.setValue(100)
+        dlg.setWindowTitle(f"100% {dlg.title} - {APP}")
+        while time.time() - shown < MIN_SHOWN and dlg.isVisible():
+            QApplication.processEvents()
+            time.sleep(0.01)
     dlg._done = True
     dlg.close()
     dlg.deleteLater()
@@ -1801,7 +1808,7 @@ def _app():
 
 
 def attach_job(job) -> int:
-    """Window for a job yzip_main started before loading Qt: it ran past 0.3 s, failed, or should stay open."""
+    """The progress window for a job yzip_main started before loading Qt."""
     _app()
     ok, r = run_job(None, job.title, None, reveal=job.reveal, done_text=job.done_text, job=job)
     if not ok:

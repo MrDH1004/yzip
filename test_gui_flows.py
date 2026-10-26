@@ -175,7 +175,7 @@ def test_run_job():
     ok, r = gui.run_job(None, "t", slow)
     check("run_job: slow job completes when not cancelled", ok and r == "done", repr((ok, r)))
 
-    # the progress dialog only appears after its 300 ms minimum duration; cancel it the way a user would
+    # cancel the progress window the way a user would
     for how in ("button", "cancel()"):
         flags["cancel_progress"] = how
         t0 = time.time()
