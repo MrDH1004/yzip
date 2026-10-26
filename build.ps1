@@ -35,7 +35,8 @@ try {
         Sign "$root\shell\build\yzipshell.dll"
         # setuptools is excluded: nothing needs it at run time, but bundled, its runtime hook imported it on
         # every launch (~0.15 s of the right-click delay).
-        Run python @("-m", "PyInstaller", "--noconfirm", "--onedir", "--windowed", "--name", "yzip",
+        # --clean: a cached build\yzip\yzip.exe kept the old icon after yzip.ico changed.
+        Run python @("-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed", "--name", "yzip",
             "--icon", "yzip.ico", "--version-file", "build\version_info.txt", "--add-data", "yzip.ico;.",
             "--add-binary", "shell\build\yzipshell.dll;.", "--exclude-module", "PySide6.QtWebEngineCore",
             "--exclude-module", "PySide6.QtQml", "--exclude-module", "PySide6.Qt3DCore",

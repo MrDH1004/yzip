@@ -1419,7 +1419,11 @@ def _delete_key_tree(key: str):
 # The compress item comes from shell\yzipshell.dll (an IContextMenu handler) so it can say "<name>.zip으로 압축하기".
 # Explorer keeps a loaded handler locked, so a versioned copy is installed outside dist (rebuilds stay possible).
 SHELLEX_CLSID = "{7E3B1C52-9A4D-4F1E-B6C2-3D8A5F0E9C71}"
-SHELLEX_KEYS = [r"Software\Classes\AllFilesystemObjects\shellex\ContextMenuHandlers\yzip"]
+# Explorer lists handlers class by class (* and Directory before AllFilesystemObjects), each class in key-name order.
+# Bandizip registers "AABdzCtx" under * and Directory, so "AAyzip" there puts our items right after Bandizip's.
+SHELLEX_KEYS = [rf"Software\Classes\{c}\shellex\ContextMenuHandlers\AAyzip" for c in ("*", "Directory")]
+# where the handler was registered before; removed on register/unregister so the items don't show twice
+OLD_SHELLEX_KEYS = [r"Software\Classes\AllFilesystemObjects\shellex\ContextMenuHandlers\yzip"]
 APP_KEY = r"Software\yzip"
 
 
@@ -1494,6 +1498,8 @@ def shell_register():
     H = winreg.HKEY_CURRENT_USER
     for key in LEGACY_SHELL_KEYS:
         _delete_key_tree(key)
+    for key in OLD_SHELLEX_KEYS:
+        _delete_tree(H, key)
     icon = sys.executable if getattr(sys, "frozen", False) else resource("yzip.ico")
     with winreg.CreateKey(H, APP_KEY) as k:  # read by the shell extension
         winreg.SetValueEx(k, "Command", 0, winreg.REG_SZ, _app_command())
@@ -1526,7 +1532,7 @@ def shell_unregister():
         _delete_key_tree(key)
     for key in LEGACY_SHELL_KEYS:
         _delete_key_tree(key)
-    for key in SHELLEX_KEYS:
+    for key in SHELLEX_KEYS + OLD_SHELLEX_KEYS:
         _delete_tree(winreg.HKEY_CURRENT_USER, key)
     _delete_tree(winreg.HKEY_CURRENT_USER, rf"Software\Classes\CLSID\{SHELLEX_CLSID}")
     _delete_tree(winreg.HKEY_CURRENT_USER, APP_KEY)
