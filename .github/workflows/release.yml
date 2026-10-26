@@ -37,11 +37,15 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: python -c "import sys, version; sys.exit(0 if version.__version__ == '${{ github.ref_name }}'.lstrip('v') else 'version.py does not match the tag')"
 
+      - name: Bundled extractors (7-Zip, unegg, unalz)
+        shell: powershell
+        run: .\fetch_tools.ps1
+
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
           YZIP_NO_UPDATE: "1"
-        run: python -W ignore -m unittest test_ziplib test_zipwriter test_formats test_updater
+        run: python -W ignore -m unittest test_ziplib test_zipwriter test_formats test_moreformats test_updater
 
       - name: Build app (shell extension + exe)
         shell: powershell

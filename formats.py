@@ -3,7 +3,8 @@ same API as ziplib.Archive (entries / needs_password / extract / test / close / 
 
 create: zip (ziplib), 7z (lzmamt: multi-threaded LZMA2, AES-256 + encrypted names with a password), tar /
 tar.gz / tar.bz2 / tar.xz / tar.zst (tarfile; xz via lzmamt), and gz / bz2 / xz / zst for a single file. Reading detects the format from the
-file's first bytes, not its extension. RAR is not supported: it cannot be written and reading needs unrar.
+file's first bytes, not its extension. Read only, through the bundled extractors (cliarchive): RAR, ISO, CAB,
+MSI, ARJ, LZH, WIM, ... (7-Zip), EGG (unegg), ALZ (unalz).
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import bz2
 import gzip
 import lzma
 import os
+import re
 import tarfile
 import time
 import zipfile
@@ -56,18 +58,56 @@ if zstd is None:
     FORMATS = [f for f in FORMATS if f.id not in ("tzst", "zst")]
 BY_ID = {f.id: f for f in FORMATS}
 
+# read through 7-Zip (cliarchive): archives proper, and disk images / installers. Only extensions are trusted:
+# 7-Zip also "opens" exe, dll, docx, ... (as sections or zip parts), which must stay ordinary files.
+SEVENZ_ARCHIVE_EXTS = [".rar", ".cab", ".arj", ".lzh", ".lha", ".zipx", ".z", ".taz", ".lzma", ".cpio", ".rpm",
+                       ".deb"]
+SEVENZ_IMAGE_EXTS = [".iso", ".img", ".udf", ".msi", ".wim", ".swm", ".esd", ".vhd", ".vhdx", ".dmg"]
+# decoded in Python (minifmt)
+MINI_EXTS = {".br": "br", ".lz": "lz", ".lz4": "lz4", ".aes": "aes", ".uu": "uu", ".uue": "uu", ".xxe": "uu",
+             ".asar": "asar"}
 # what "압축 풀기" handles in Explorer and in the open dialog (one registry key per final extension)
-READ_EXTS = [".zip", ".7z", ".tar", ".tgz", ".gz", ".tbz", ".tbz2", ".bz2", ".txz", ".xz", ".tzst", ".zst"]
-OPEN_FILTER = "압축 파일 (" + " ".join("*" + e for e in READ_EXTS + [".001"]) + ");;모든 파일 (*.*)"
+READ_EXTS = [".zip", ".7z", ".tar", ".tgz", ".gz", ".tbz", ".tbz2", ".bz2", ".txz", ".xz", ".tzst", ".zst", ".egg",
+             ".alz"] + SEVENZ_ARCHIVE_EXTS + list(MINI_EXTS) + SEVENZ_IMAGE_EXTS
+# images and installers: right-clicking them still offers compressing (they are not "just an archive")
+IMAGE_EXTS = list(SEVENZ_IMAGE_EXTS)
+OPEN_FILTER = "압축 파일 (" + " ".join("*" + e for e in READ_EXTS + [".001", ".r00", ".a00"]) + ");;모든 파일 (*.*)"
 _MULTI_EXTS = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
 _TAR_NAMES = _MULTI_EXTS + (".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst")
+# volumes of one set: x.part2.rar / x.r00 (RAR), x.vol2.egg (EGG), x.a00 (ALZ), x.z01 (ZIP, Bandizip / WinZip)
+_VOLUME = re.compile(r"^(.*?)(?:\.part(\d+)\.rar|\.r(\d\d)|\.vol(\d+)\.egg|\.a(\d\d)|\.z(\d\d))$", re.I)
+
+
+def first_volume(path: str) -> str:
+    """The file that opens a whole multi-volume set, for any of its volumes; path itself otherwise."""
+    d, name = os.path.split(path)
+    m = _VOLUME.match(name)
+    if not m:
+        return path
+    base = m.group(1)
+    if m.group(2):  # x.part07.rar -> x.part01.rar (same width)
+        cand = f"{base}.part{1:0{len(m.group(2))}d}.rar"
+    elif m.group(3):
+        cand = base + ".rar"
+    elif m.group(4):
+        cand = base + ".vol1.egg"
+    elif m.group(5):
+        cand = base + ".alz"
+    else:
+        cand = base + ".zip"
+    cand = os.path.join(d, cand)
+    return cand if os.path.exists(cand) else path
 
 
 def stem(path: str) -> str:
-    """Archive name without its format extension: a.tar.gz -> a, a.zip.001 -> a, a.zip -> a."""
+    """Archive name without its format extension: a.tar.gz -> a, a.zip.001 -> a, a.zip -> a, a.part1.rar -> a,
+    a.vol1.egg -> a."""
     name = os.path.basename(path)
     if ziplib.is_split_first(name):
         name = name[:-4]
+    m = _VOLUME.match(name)
+    if m and (m.group(2) or m.group(4)):
+        return m.group(1)
     low = name.lower()
     for e in _MULTI_EXTS:
         if low.endswith(e):
@@ -83,15 +123,28 @@ def with_format(path: str, fmt_id: str) -> str:
 # ---------- detection ----------
 
 def detect(path: str) -> str:
-    """'zip' | '7z' | 'tar' (any compression) | 'gz' | 'bz2' | 'xz' | 'zst'; ValueError if none of these."""
+    """'zip' | '7z' | 'tar' (any compression) | 'gz' | 'bz2' | 'xz' | 'zst', or through a bundled tool:
+    '7zcli' (RAR, ISO, CAB, ...) | 'egg' | 'alz'; ValueError if none of these."""
     with open(path, "rb") as f:
         head = f.read(8)
+    low = path.lower()
     if ziplib.is_split_first(path):
         return "7z" if head[:6] == b"7z\xbc\xaf\x27\x1c" else "zip"
+    if head[:4] == b"EGGA":
+        return "egg"
+    if head[:4] == b"ALZ\x01":
+        return "alz"
+    if head[:7] == b"Rar!\x1a\x07\x00" or head[:8] == b"Rar!\x1a\x07\x01\x00" or head[:4] == b"MSCF":
+        return "7zcli"
+    if low.endswith(".zipx") or low.endswith(".zip") and os.path.exists(path[:-4] + ".z01"):
+        return "7zcli"  # newer ZIP methods / a Bandizip-WinZip split set (.z01 .z02 ... .zip): 7-Zip reads both
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
         return "zip"
     if head[:6] == b"7z\xbc\xaf\x27\x1c":
         return "7z"
+    # before the tar probe: an ISO / disk image starts with zeroed sectors, which tarfile takes for an empty tar
+    if low.endswith(tuple(SEVENZ_ARCHIVE_EXTS + SEVENZ_IMAGE_EXTS)):
+        return "7zcli"
     try:
         with tarfile.open(path, "r:*"):
             return "tar"
@@ -106,13 +159,31 @@ def detect(path: str) -> str:
         return "xz"
     if head[:4] == b"\x28\xb5\x2f\xfd" and zstd is not None:
         return "zst"
+    if head[:4] == b"LZIP":
+        return "lz"
+    if head[:4] in (b"\x04\x22\x4d\x18", b"\x02\x21\x4c\x18"):
+        return "lz4"
+    if head[:3] == b"AES" and low.endswith(".aes"):
+        return "aes"
+    for ext, kind in MINI_EXTS.items():  # no reliable magic (Brotli, text encodings, ASAR): by name
+        if low.endswith(ext):
+            return kind
     if zipfile.is_zipfile(path):  # e.g. a ZIP behind a self-extractor stub
         return "zip"
     raise ValueError("지원하지 않는 압축 형식입니다.")
 
 
 def open_any(path: str, password: Optional[str] = None):
+    path = first_volume(path)  # any volume of a set opens the whole set
     kind = detect(path)
+    if kind in ("7zcli", "egg", "alz"):
+        import cliarchive
+        return cliarchive.CliArchive(path, kind, password)
+    if kind in ("uu", "asar"):
+        import minifmt
+        return minifmt.UUArchive(path) if kind == "uu" else minifmt.AsarArchive(path)
+    if kind in ("br", "lz", "lz4", "aes"):
+        return StreamArchive(path, kind, password)
     if kind == "zip":
         return ziplib.Archive(path, password)
     if kind == "7z":
@@ -375,7 +446,10 @@ class TarArchive(_Base):
 
 # ---------- single compressed file (.gz / .bz2 / .xz / .zst) ----------
 
-def _stream_open(kind: str, path: str):
+def _stream_open(kind: str, path: str, password: Optional[str] = None):
+    if kind in ("br", "lz", "lz4", "aes"):
+        import minifmt
+        return minifmt.open_stream(kind, path, password)
     if kind == "gz":
         return gzip.open(path, "rb")
     if kind == "bz2":
@@ -386,8 +460,8 @@ def _stream_open(kind: str, path: str):
 
 
 class StreamArchive(_Base):
-    def __init__(self, path: str, kind: str):
-        self.path, self.kind = path, kind
+    def __init__(self, path: str, kind: str, password: Optional[str] = None):
+        self.path, self.kind, self.password = path, kind, password or None
         self.name = stem(path) or "data"
         self.csize = os.path.getsize(path)
         self.size = 0  # unknown (bz2, zst): progress then shows bytes without a percentage
@@ -404,7 +478,10 @@ class StreamArchive(_Base):
 
     def entries(self) -> list[Entry]:
         return [Entry(self.name, False, self.size or self.csize, self.csize, _local(self.mtime), self.kind.upper(),
-                      False, 0)]
+                      self.kind == "aes", 0)]
+
+    def needs_password(self) -> bool:
+        return self.kind == "aes"  # AES Crypt
 
     def extract(self, dest, names=None, progress=None, cancel=None, overwrite=True):
         if names is not None and self.name not in names:
@@ -413,16 +490,16 @@ class StreamArchive(_Base):
         t = plan.target(self.name, False)
         if t is None:
             return
-        with _stream_open(self.kind, self.path) as src:
+        with _stream_open(self.kind, self.path, self.password) as src:
             _copy_out(src, t, _Counter(self.size, progress, cancel), self.name, self.mtime)
 
     def test(self, progress=None, cancel=None) -> list[str]:
         counter = _Counter(self.size, progress, cancel)
         try:
-            with _stream_open(self.kind, self.path) as src:
+            with _stream_open(self.kind, self.path, self.password) as src:
                 while buf := src.read(1 << 20):
                     counter.add(len(buf), self.name)
-        except Cancelled:
+        except (Cancelled, BadPassword):
             raise
         except Exception:
             return [self.name]

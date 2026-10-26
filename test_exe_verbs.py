@@ -252,6 +252,19 @@ with tempfile.TemporaryDirectory(prefix="yze_") as t:
     check("archive: extract items only, no compress items", verbs == ["yzip.extracthere", "yzip.extractfolder"], verbs)
     check("non-archive: no extract items", not [it for it in probe("list", [files["b.bin"]])[1]
                                                   if len(it) > 2 and it[2].startswith("yzip.extract")])
+    import shutil  # noqa: E402
+    egg = os.path.join(t, "sample.egg")
+    shutil.copy(os.path.join(HERE, "testdata", "normal.egg"), egg)
+    iso = os.path.join(t, "disc.iso")
+    open(iso, "wb").close()
+    yv = lambda p: [it[2] for it in probe("list", [p])[1] if len(it) > 2 and it[2].startswith("yzip.")]
+    check("EGG (read via unegg): extract items only", yv(egg) == ["yzip.extracthere", "yzip.extractfolder"], yv(egg))
+    check("ISO (disk image): extract items and compress items",
+          yv(iso) == ["yzip.extracthere", "yzip.extractfolder", "yzip.compress", "yzip.compressdlg"], yv(iso))
+    code, _, raw = probe("invoke:yzip.extractfolder", [egg], env)
+    got = os.path.join(t, "sample", "hello.txt")
+    check("invoke '폴더에 압축 풀기' on an EGG: extracted by the bundled unegg", code == 0 and wait_done(got),
+          (code, raw[-300:], os.listdir(t)))
     label = lambda: [it[0] for it in probe("list", [z])[1] if len(it) > 2 and it[2] == "yzip.extractfolder"]
     check("folder item names the folder: 'pack\\에 압축 풀기'", label() == ["pack\\에 압축 풀기"], label())
     code, _, raw = probe("invoke:yzip.extractfolder", [z], env)

@@ -30,6 +30,7 @@ Push-Location $root
 try {
     $version = (python make_version_files.py).Trim()
     if ($Stage -in "all", "app") {
+        & "$root\fetch_tools.ps1"  # tools\: 7-Zip, unegg, unalz (pinned; skipped when already there)
         cmd /c "`"$root\shell\build.cmd`" 2>nul" | Select-Object -Last 1
         if ($LASTEXITCODE) { throw "셸 확장 빌드 실패" }
         Sign "$root\shell\build\yzipshell.dll"
@@ -38,7 +39,10 @@ try {
         # --clean: a cached build\yzip\yzip.exe kept the old icon after yzip.ico changed.
         Run python @("-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed", "--name", "yzip",
             "--icon", "yzip.ico", "--version-file", "build\version_info.txt", "--add-data", "yzip.ico;.",
-            "--add-binary", "shell\build\yzipshell.dll;.", "--exclude-module", "PySide6.QtWebEngineCore",
+            "--add-binary", "shell\build\yzipshell.dll;.", "--add-binary", "tools\7z.exe;tools",
+            "--add-binary", "tools\7z.dll;tools", "--add-binary", "tools\unegg.exe;tools",
+            "--add-binary", "tools\unalz.exe;tools", "--add-data", "tools\licenses;tools\licenses",
+            "--hidden-import", "cliarchive", "--hidden-import", "minifmt", "--exclude-module", "PySide6.QtWebEngineCore",
             "--exclude-module", "PySide6.QtQml", "--exclude-module", "PySide6.Qt3DCore",
             "--exclude-module", "setuptools", "--exclude-module", "pkg_resources",
             "--exclude-module", "_distutils_hack", "--hidden-import", "yzip_gui", "yzip_main.py")

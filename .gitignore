@@ -18,3 +18,6 @@ __pycache__/
 *.key
 .env
 perf*.json
+
+# external extractors fetched/built by fetch_tools.ps1
+tools/

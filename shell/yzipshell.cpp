@@ -103,18 +103,20 @@ static std::wstring icon_source() {
     return buf;
 }
 
-// ";.zip;.7z;...;" (lowercase) from --register-shell
-static std::wstring archive_exts() {
-    wchar_t buf[1024];
+// ";.zip;.7z;...;" (lowercase) from --register-shell: ArchiveExts (archives proper) or ImageExts (disk images,
+// installers: yzip extracts them, but they are not "just an archive", so compressing stays offered)
+static std::wstring ext_list(const wchar_t* value) {
+    wchar_t buf[2048];
     DWORD cb = sizeof(buf);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\yzip", L"ArchiveExts", RRF_RT_REG_SZ, nullptr, buf, &cb) != ERROR_SUCCESS)
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\yzip", value, RRF_RT_REG_SZ, nullptr, buf, &cb) != ERROR_SUCCESS)
         return L"";
     std::wstring s = L";" + std::wstring(buf) + L";";
     CharLowerBuffW(&s[0], (DWORD)s.size());
     return s;
 }
 
-// formats.stem + unique_dir: "C:\a\Kings.zip" -> "C:\a\Kings", or "C:\a\Kings (2)" when that name is taken
+// formats.stem + unique_dir: "C:\a\Kings.zip" -> "C:\a\Kings", or "C:\a\Kings (2)" when that name is taken;
+// a volume set is named without its volume part: "x.part1.rar", "x.vol1.egg" -> "x"
 static std::wstring extract_dir(const std::wstring& arc) {
     std::wstring dir = arc.substr(0, last_sep(arc) + 1), name = file_name(arc), low = name;
     CharLowerBuffW(&low[0], (DWORD)low.size());
@@ -123,6 +125,18 @@ static std::wstring extract_dir(const std::wstring& arc) {
         size_t n = wcslen(e);
         if (low.size() > n && low.compare(low.size() - n, n, e) == 0)
             stem = name.substr(0, name.size() - n);
+    }
+    for (const wchar_t* e : {L".rar", L".egg"}) {  // ".partN.rar" / ".volN.egg"
+        size_t n = wcslen(e);
+        if (stem.empty() && low.size() > n && low.compare(low.size() - n, n, e) == 0) {
+            size_t dot = low.find_last_of(L'.', low.size() - n - 1);
+            std::wstring mid = dot == std::wstring::npos ? L"" : low.substr(dot + 1, low.size() - n - dot - 1);
+            const wchar_t* word = e[1] == L'r' ? L"part" : L"vol";
+            size_t w = wcslen(word);
+            if (mid.size() > w && mid.compare(0, w, word) == 0 &&
+                mid.find_first_not_of(L"0123456789", w) == std::wstring::npos)
+                stem = name.substr(0, dot);
+        }
     }
     if (stem.empty())
         stem = file_name(strip_ext(arc));
@@ -142,21 +156,15 @@ static std::wstring escape_amp(const std::wstring& s) {
     return esc;
 }
 
-static bool all_archives(const std::vector<std::wstring>& paths) {
-    std::wstring exts = archive_exts();
-    if (exts.size() <= 2)
-        return false;
-    for (auto& p : paths) {
-        std::wstring name = file_name(p);
-        size_t dot = name.find_last_of(L'.');
-        if (dot == std::wstring::npos || dot == 0 || is_dir(p))
-            return false;
-        std::wstring ext = name.substr(dot);
-        CharLowerBuffW(&ext[0], (DWORD)ext.size());
-        if (exts.find(L";" + ext + L";") == std::wstring::npos)
-            return false;
-    }
-    return true;
+// 0: not something yzip extracts, 1: an archive, 2: a disk image / installer yzip can extract
+static int extract_kind(const std::wstring& p, const std::wstring& archives, const std::wstring& images) {
+    std::wstring name = file_name(p);
+    size_t dot = name.find_last_of(L'.');
+    if (dot == std::wstring::npos || dot == 0 || is_dir(p))
+        return 0;
+    std::wstring ext = L";" + name.substr(dot) + L";";
+    CharLowerBuffW(&ext[0], (DWORD)ext.size());
+    return archives.find(ext) != std::wstring::npos ? 1 : images.find(ext) != std::wstring::npos ? 2 : 0;
 }
 
 // 32bpp top-down DIB with alpha, which is what menus need for a crisp icon
@@ -260,8 +268,14 @@ public:
         cmds_.clear();
         std::vector<std::wstring> labels;
         into_.clear();
-        bool archives = all_archives(paths_);
-        if (archives) {
+        std::wstring arc_exts = ext_list(L"ArchiveExts"), img_exts = ext_list(L"ImageExts");
+        bool extractable = true, archives = true;  // every item extractable / every item an archive proper
+        for (auto& p : paths_) {
+            int k = extract_kind(p, arc_exts, img_exts);
+            extractable = extractable && k != 0;
+            archives = archives && k == 1;
+        }
+        if (extractable) {
             cmds_.push_back(CMD_HERE);
             labels.push_back(L"여기에 압축 풀기");
             cmds_.push_back(CMD_FOLDER);

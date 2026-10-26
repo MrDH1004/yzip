@@ -1573,7 +1573,9 @@ def shell_register():
     with winreg.CreateKey(H, APP_KEY) as k:  # read by the shell extension
         winreg.SetValueEx(k, "Command", 0, winreg.REG_SZ, _app_command())
         winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
-        winreg.SetValueEx(k, "ArchiveExts", 0, winreg.REG_SZ, ";".join(formats.READ_EXTS))
+        winreg.SetValueEx(k, "ArchiveExts", 0, winreg.REG_SZ,
+                          ";".join(e for e in formats.READ_EXTS if e not in formats.IMAGE_EXTS))
+        winreg.SetValueEx(k, "ImageExts", 0, winreg.REG_SZ, ";".join(formats.IMAGE_EXTS))
     dll_src = shell_dll_source()
     for key, label, flag in SHELL_VERBS:
         if dll_src:
@@ -1875,7 +1877,10 @@ def main():
     if args[:1] == ["--extract-list"] and len(args) >= 3 and args[1] in ("here", "folder"):
         # from the shell extension: --extract-list here|folder LIST [--out DIR]; DIR is the folder its menu
         # named ("Kings (2)\에 압축 풀기"), given for a single archive only
-        paths = read_list(args[2])
+        paths = []
+        for p in read_list(args[2]):  # several volumes of one set (x.part1.rar, x.part2.rar): extract it once
+            if formats.first_volume(p).lower() not in [formats.first_volume(q).lower() for q in paths]:
+                paths.append(p)
         into = args[4] if len(args) >= 5 and args[3] == "--out" and len(paths) == 1 else None
         for arc in paths:
             quick_extract(win, arc, args[1] == "folder", into)
