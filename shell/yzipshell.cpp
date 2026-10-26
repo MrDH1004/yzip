@@ -1,4 +1,9 @@
-// yzip Explorer context-menu handler, two items:
+// yzip Explorer context-menu handler. When every selected item is an archive (an extension listed in
+// HKCU\Software\yzip\ArchiveExts), first the extract items, so they sit in the menu's extract section next to
+// Windows' and Bandizip's instead of the static-verb group at the top:
+//   2 "여기에 압축 풀기": <Command> --extract-list here <list>
+//   3 "폴더에 압축 풀기": <Command> --extract-list folder <list>
+// otherwise (not all archives) the compress items:
 //   0 "<name>.zip으로 압축하기 - yzip": compresses at once. The handler decides the output path (same "(2)" rule
 //     as yzip's unique_path) so the label and the file always agree: <Command> --archive-list <list> --out <zip>
 //   1 "yzip으로 압축하기(W)...": opens yzip's compress window (format, password, ...):
@@ -15,9 +20,9 @@
 
 // {7E3B1C52-9A4D-4F1E-B6C2-3D8A5F0E9C71}
 static const CLSID CLSID_YzipMenu = {0x7e3b1c52, 0x9a4d, 0x4f1e, {0xb6, 0xc2, 0x3d, 0x8a, 0x5f, 0x0e, 0x9c, 0x71}};
-static const wchar_t* const VERBS_W[] = {L"yzip.compress", L"yzip.compressdlg"};
-static const char* const VERBS_A[] = {"yzip.compress", "yzip.compressdlg"};
-static const UINT N_ITEMS = 2;
+enum { CMD_COMPRESS, CMD_DIALOG, CMD_HERE, CMD_FOLDER, N_CMDS };
+static const wchar_t* const VERBS_W[] = {L"yzip.compress", L"yzip.compressdlg", L"yzip.extracthere", L"yzip.extractfolder"};
+static const char* const VERBS_A[] = {"yzip.compress", "yzip.compressdlg", "yzip.extracthere", "yzip.extractfolder"};
 
 static HINSTANCE g_inst;
 static long g_refs;
@@ -98,6 +103,62 @@ static std::wstring icon_source() {
     return buf;
 }
 
+// ";.zip;.7z;...;" (lowercase) from --register-shell
+static std::wstring archive_exts() {
+    wchar_t buf[1024];
+    DWORD cb = sizeof(buf);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\yzip", L"ArchiveExts", RRF_RT_REG_SZ, nullptr, buf, &cb) != ERROR_SUCCESS)
+        return L"";
+    std::wstring s = L";" + std::wstring(buf) + L";";
+    CharLowerBuffW(&s[0], (DWORD)s.size());
+    return s;
+}
+
+// formats.stem + unique_dir: "C:\a\Kings.zip" -> "C:\a\Kings", or "C:\a\Kings (2)" when that name is taken
+static std::wstring extract_dir(const std::wstring& arc) {
+    std::wstring dir = arc.substr(0, last_sep(arc) + 1), name = file_name(arc), low = name;
+    CharLowerBuffW(&low[0], (DWORD)low.size());
+    std::wstring stem;
+    for (const wchar_t* e : {L".tar.gz", L".tar.bz2", L".tar.xz", L".tar.zst"}) {
+        size_t n = wcslen(e);
+        if (low.size() > n && low.compare(low.size() - n, n, e) == 0)
+            stem = name.substr(0, name.size() - n);
+    }
+    if (stem.empty())
+        stem = file_name(strip_ext(arc));
+    std::wstring out = dir + stem;
+    for (int i = 2; exists(out); i++)
+        out = dir + stem + L" (" + std::to_wstring(i) + L")";
+    return out;
+}
+
+static std::wstring escape_amp(const std::wstring& s) {
+    std::wstring esc;
+    for (wchar_t c : s) {
+        if (c == L'&')
+            esc += L'&';
+        esc += c;
+    }
+    return esc;
+}
+
+static bool all_archives(const std::vector<std::wstring>& paths) {
+    std::wstring exts = archive_exts();
+    if (exts.size() <= 2)
+        return false;
+    for (auto& p : paths) {
+        std::wstring name = file_name(p);
+        size_t dot = name.find_last_of(L'.');
+        if (dot == std::wstring::npos || dot == 0 || is_dir(p))
+            return false;
+        std::wstring ext = name.substr(dot);
+        CharLowerBuffW(&ext[0], (DWORD)ext.size());
+        if (exts.find(L";" + ext + L";") == std::wstring::npos)
+            return false;
+    }
+    return true;
+}
+
 // 32bpp top-down DIB with alpha, which is what menus need for a crisp icon
 static HBITMAP icon_bitmap(const std::wstring& src) {
     if (src.empty())
@@ -143,6 +204,8 @@ class YzipMenu : public IShellExtInit, public IContextMenu {
     long refs_ = 1;
     std::vector<std::wstring> paths_;
     std::wstring out_;
+    std::wstring into_;  // one archive: the folder "폴더에 압축 풀기" names and extracts into
+    std::vector<int> cmds_;  // command of each menu offset
     HBITMAP bmp_ = nullptr;
 
 public:
@@ -194,12 +257,35 @@ public:
         if (paths_.empty() || read_command().empty())
             return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
         out_ = output_path(paths_);
-        if (out_.empty())
+        cmds_.clear();
+        std::vector<std::wstring> labels;
+        into_.clear();
+        bool archives = all_archives(paths_);
+        if (archives) {
+            cmds_.push_back(CMD_HERE);
+            labels.push_back(L"여기에 압축 풀기");
+            cmds_.push_back(CMD_FOLDER);
+            if (paths_.size() == 1) {  // like Bandizip's "Kings (2)\ 에 풀기": the real folder, numbered if taken
+                into_ = extract_dir(paths_[0]);
+                std::wstring n = file_name(into_);
+                if (n.size() > 52)
+                    n = n.substr(0, 24) + L"…" + n.substr(n.size() - 24);
+                labels.push_back(escape_amp(n) + L"\\에 압축 풀기");
+            } else {
+                labels.push_back(L"각각의 폴더에 압축 풀기");
+            }
+        }
+        if (!out_.empty() && !archives) {  // archives get the extract items only
+            cmds_.push_back(CMD_COMPRESS);
+            labels.push_back(menu_label(out_));
+            cmds_.push_back(CMD_DIALOG);
+            labels.push_back(L"yzip으로 압축하기(&W)...");
+        }
+        if (cmds_.empty())
             return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
-        std::wstring labels[N_ITEMS] = {menu_label(out_), L"yzip으로 압축하기(&W)..."};
         if (!bmp_)
             bmp_ = icon_bitmap(icon_source());
-        for (UINT i = 0; i < N_ITEMS; i++) {
+        for (UINT i = 0; i < cmds_.size(); i++) {
             MENUITEMINFOW mii = {sizeof(mii)};
             mii.fMask = MIIM_STRING | MIIM_ID | MIIM_FTYPE | (bmp_ ? MIIM_BITMAP : 0);
             mii.fType = MFT_STRING;
@@ -209,24 +295,26 @@ public:
             if (!InsertMenuItemW(menu, index + i, TRUE, &mii))
                 return HRESULT_FROM_WIN32(GetLastError());
         }
-        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, N_ITEMS);
+        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, (USHORT)cmds_.size());
     }
 
-    // which item: 0 / 1 from an offset or a verb string, -1 if not ours
-    static int command_of(LPCMINVOKECOMMANDINFO pici) {
+    // which command (CMD_*) from a menu offset or a verb string, -1 if not ours
+    int command_of(LPCMINVOKECOMMANDINFO pici) const {
         bool unicode = pici->cbSize == sizeof(CMINVOKECOMMANDINFOEX) && (pici->fMask & CMIC_MASK_UNICODE);
-        for (int i = 0; i < (int)N_ITEMS; i++) {
-            if (unicode && HIWORD(((CMINVOKECOMMANDINFOEX*)pici)->lpVerbW)) {
+        if (unicode && HIWORD(((CMINVOKECOMMANDINFOEX*)pici)->lpVerbW)) {
+            for (int i = 0; i < N_CMDS; i++)
                 if (!lstrcmpiW(((CMINVOKECOMMANDINFOEX*)pici)->lpVerbW, VERBS_W[i]))
                     return i;
-            } else if (HIWORD(pici->lpVerb)) {
+            return -1;
+        }
+        if (HIWORD(pici->lpVerb)) {
+            for (int i = 0; i < N_CMDS; i++)
                 if (!lstrcmpiA(pici->lpVerb, VERBS_A[i]))
                     return i;
-            } else if (LOWORD(pici->lpVerb) == i) {
-                return i;
-            }
+            return -1;
         }
-        return -1;
+        UINT off = LOWORD(pici->lpVerb);
+        return off < cmds_.size() ? cmds_[off] : -1;
     }
 
     IFACEMETHODIMP InvokeCommand(LPCMINVOKECOMMANDINFO pici) {
@@ -236,9 +324,9 @@ public:
         std::wstring cmd = read_command();
         if (cmd.empty() || paths_.empty())
             return E_FAIL;
-        if (which == 0 && out_.empty())
+        if (which == CMD_COMPRESS && out_.empty())
             out_ = output_path(paths_);
-        if (which == 0 && out_.empty())
+        if (which == CMD_COMPRESS && out_.empty())
             return E_FAIL;
 
         wchar_t tmp[MAX_PATH];
@@ -251,8 +339,11 @@ public:
         if (!write_utf8(list, text))
             return E_FAIL;
 
-        std::wstring line = which == 0 ? cmd + L" --archive-list \"" + list + L"\" --out \"" + out_ + L"\""
-                                       : cmd + L" --compress-dialog-list \"" + list + L"\"";
+        std::wstring line = which == CMD_COMPRESS ? cmd + L" --archive-list \"" + list + L"\" --out \"" + out_ + L"\""
+                          : which == CMD_DIALOG   ? cmd + L" --compress-dialog-list \"" + list + L"\""
+                          : which == CMD_HERE     ? cmd + L" --extract-list here \"" + list + L"\""
+                                                  : cmd + L" --extract-list folder \"" + list + L"\"" +
+                                                        (into_.empty() ? L"" : L" --out \"" + into_ + L"\"");
         std::wstring dir = paths_[0].substr(0, last_sep(paths_[0]) + 1);
         STARTUPINFOW si = {sizeof(si)};
         PROCESS_INFORMATION pi = {};
@@ -266,19 +357,22 @@ public:
     }
 
     IFACEMETHODIMP GetCommandString(UINT_PTR id, UINT type, UINT*, LPSTR name, UINT cch) {
-        if (id >= N_ITEMS)
+        if (id >= cmds_.size())
             return E_INVALIDARG;
+        int c = cmds_[id];
+        static const wchar_t* const HELP_W[] = {L"선택한 항목을 ZIP 파일로 바로 압축합니다", L"형식과 암호 등을 골라 압축합니다",
+                                                L"압축 파일이 있는 폴더에 풉니다", L"압축 파일 이름의 폴더에 풉니다"};
+        static const char* const HELP_A[] = {"Compress the selection to a ZIP file", "Choose format and options, then compress",
+                                             "Extract next to the archive", "Extract into a folder named after the archive"};
         switch (type) {
         case GCS_VERBW:
-            return StringCchCopyW((LPWSTR)name, cch, VERBS_W[id]);
+            return StringCchCopyW((LPWSTR)name, cch, VERBS_W[c]);
         case GCS_VERBA:
-            return StringCchCopyA(name, cch, VERBS_A[id]);
+            return StringCchCopyA(name, cch, VERBS_A[c]);
         case GCS_HELPTEXTW:
-            return StringCchCopyW((LPWSTR)name, cch, id == 0 ? L"선택한 항목을 ZIP 파일로 바로 압축합니다"
-                                                             : L"형식과 암호 등을 골라 압축합니다");
+            return StringCchCopyW((LPWSTR)name, cch, HELP_W[c]);
         case GCS_HELPTEXTA:
-            return StringCchCopyA(name, cch, id == 0 ? "Compress the selection to a ZIP file"
-                                                     : "Choose format and options, then compress");
+            return StringCchCopyA(name, cch, HELP_A[c]);
         case GCS_VALIDATEW:
         case GCS_VALIDATEA:
             return S_OK;

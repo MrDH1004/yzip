@@ -388,6 +388,11 @@ class CompressDialog(QDialog):
             QMessageBox.warning(self, APP, "분할 크기를 이해할 수 없습니다. 예: 100MB, 1440KB (최소 64KB)")
             return
         out = self.options()["out_path"]
+        import appcore
+        if not appcore.can_write(os.path.dirname(os.path.abspath(out))):
+            QMessageBox.warning(self, APP, f"{os.path.dirname(os.path.abspath(out))}\n\n이 위치에는 관리자 권한이 "
+                                           "있어야 파일을 만들 수 있습니다. 다른 위치를 선택해 주세요.")
+            return
         if os.path.exists(out) and QMessageBox.question(
                 self, APP, f"{os.path.basename(out)} 파일이 이미 있습니다. 덮어쓸까요?") != QMessageBox.Yes:
             return
@@ -464,9 +469,17 @@ class ExtractDialog(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("풀기")
         bb.button(QDialogButtonBox.Cancel).setText("취소")
-        bb.accepted.connect(self.accept)
+        bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
         lay.addRow(bb)
+
+    def _ok(self):
+        import appcore
+        if not appcore.can_write(self.dest.text()):
+            QMessageBox.warning(self, APP, f"{self.dest.text()}\n\n이 위치에는 관리자 권한이 있어야 파일을 만들 수 "
+                                           "있습니다. 다른 위치를 선택해 주세요.")
+            return
+        self.accept()
 
 
 def unique_path(p: str) -> str:
@@ -479,17 +492,56 @@ def unique_path(p: str) -> str:
     return f"{base} ({i}){ext}"
 
 
+def writable_target(parent, target: str, elevate_args, pick, folder: str | None = None):
+    """target (a file to create, or a folder to extract into) lies where only administrators may write (C:\\,
+    Program Files). Like Bandizip, yzip then runs the same job as administrator right away (Windows asks in its
+    UAC prompt); only if that is refused, offer another place. elevate_args() -> argv for the elevated yzip;
+    pick(parent) -> new target or "". Returns the target to use, or None when there is nothing more to do here."""
+    import appcore
+    folder = folder or os.path.dirname(os.path.abspath(target))
+    if os.environ.get("YZIP_AUTOACCEPT"):  # unattended tests: never raise a UAC prompt
+        return target if appcore.can_write(folder) else None
+    if not appcore.can_write(folder) and appcore.run_elevated(elevate_args()):
+        return None
+    while not appcore.can_write(folder):
+        box = QMessageBox(QMessageBox.Warning, APP, f"{folder}\n\n이 위치에는 관리자 권한이 있어야 파일을 만들 수 "
+                                                    "있습니다. 다른 위치에 저장할까요?", parent=parent)
+        other = box.addButton("다른 위치에 저장...", QMessageBox.AcceptRole)
+        box.addButton("취소", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not other:
+            return None
+        target = pick(parent)
+        if not target:
+            return None
+        folder = target if os.path.isdir(target) else os.path.dirname(os.path.abspath(target))
+    return target
+
+
+def _desktop() -> str:
+    d = os.path.join(os.path.expanduser("~"), "Desktop")
+    return d if os.path.isdir(d) else os.path.expanduser("~")
+
+
 def ask_password(parent, archive, retry=False):
     pw, ok = QInputDialog.getText(parent, "암호 필요", ("암호가 틀렸습니다. 다시 입력:" if retry else "암호 입력:"),
                                   QLineEdit.Password)
     return pw if ok else None
 
 
+def unique_dir(p: str) -> str:
+    """A folder name not taken yet, Bandizip style: "name", else "name (2)", "name (3)", ..."""
+    i, q = 2, p
+    while os.path.exists(q):
+        q, i = f"{p} ({i})", i + 1
+    return q
+
+
 def smart_dest(archive, dest: str, arc_path: str) -> str:
     tops = {e.name.replace("\\", "/").split("/")[0] for e in archive.entries() if e.name}
     if len(tops) <= 1:
         return dest
-    return os.path.join(dest, formats.stem(arc_path))
+    return unique_dir(os.path.join(dest, formats.stem(arc_path)))
 
 
 MAIN_QSS = """
@@ -1229,6 +1281,14 @@ class Main(QMainWindow):
             base = first if os.path.isdir(first) else os.path.splitext(first)[0]  # folder "v1.2" stays "v1.2"
         if not ask:  # like Bandizip's "<name>.zip으로 압축하기": no options, just a progress window
             out, o = out or unique_path(base + ".zip"), {"fmt": "zip"}
+            import appcore
+            first_out = out
+            out = writable_target(
+                parent, out, lambda: ["--archive-list", appcore.write_list(paths), "--out", first_out],
+                lambda w: QFileDialog.getSaveFileName(w, "다른 위치에 저장", unique_path(
+                    os.path.join(_desktop(), os.path.basename(first_out))), "ZIP 파일 (*.zip)")[0])
+            if not out:
+                return
         else:
             dlg = CompressDialog(parent, unique_path(base + ".zip"), paths)
             auto = os.environ.get("YZIP_AUTOACCEPT")
@@ -1420,10 +1480,12 @@ def _delete_key_tree(key: str):
 # Explorer keeps a loaded handler locked, so a versioned copy is installed outside dist (rebuilds stay possible).
 SHELLEX_CLSID = "{7E3B1C52-9A4D-4F1E-B6C2-3D8A5F0E9C71}"
 # Explorer lists handlers class by class (* and Directory before AllFilesystemObjects), each class in key-name order.
-# Bandizip registers "AABdzCtx" under * and Directory, so "AAyzip" there puts our items right after Bandizip's.
-SHELLEX_KEYS = [rf"Software\Classes\{c}\shellex\ContextMenuHandlers\AAyzip" for c in ("*", "Directory")]
+# Bandizip registers "AABdzCtx" under * and Directory; "AAAyzip" sorts just before it, so our items join the
+# block of Windows' "압축 풀기(T)..." and Bandizip's items instead of starting their own block below them.
+SHELLEX_KEYS = [rf"Software\Classes\{c}\shellex\ContextMenuHandlers\AAAyzip" for c in ("*", "Directory")]
 # where the handler was registered before; removed on register/unregister so the items don't show twice
-OLD_SHELLEX_KEYS = [r"Software\Classes\AllFilesystemObjects\shellex\ContextMenuHandlers\yzip"]
+OLD_SHELLEX_KEYS = [r"Software\Classes\AllFilesystemObjects\shellex\ContextMenuHandlers\yzip"] + [
+    rf"Software\Classes\{c}\shellex\ContextMenuHandlers\AAyzip" for c in ("*", "Directory")]
 APP_KEY = r"Software\yzip"
 
 
@@ -1504,10 +1566,13 @@ def shell_register():
     with winreg.CreateKey(H, APP_KEY) as k:  # read by the shell extension
         winreg.SetValueEx(k, "Command", 0, winreg.REG_SZ, _app_command())
         winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, icon)
+        winreg.SetValueEx(k, "ArchiveExts", 0, winreg.REG_SZ, ";".join(formats.READ_EXTS))
     dll_src = shell_dll_source()
     for key, label, flag in SHELL_VERBS:
-        if flag == "--archive" and dll_src:
-            _delete_key_tree(key)  # the shell extension shows this item, with the real file name
+        if dll_src:
+            # the shell extension shows these items: with the real names, and the extract ones in the menu's
+            # extract section (a static verb always lands in the top group)
+            _delete_key_tree(key)
             continue
         with winreg.CreateKey(H, key) as k:
             winreg.SetValueEx(k, "", 0, winreg.REG_SZ, label)
@@ -1538,15 +1603,17 @@ def shell_unregister():
     _delete_tree(winreg.HKEY_CURRENT_USER, APP_KEY)
 
 
-def quick_extract(win: Main, arc: str, folder: bool):
-    dest = os.path.dirname(os.path.abspath(arc))
+def quick_extract(win: Main, arc: str, folder: bool, into: str | None = None):
+    """'여기에 / 폴더에 압축 풀기'. into: the folder the shell extension's menu named ("Kings (2)")."""
+    here = os.path.dirname(os.path.abspath(into or arc))
+    dest = writable_target(None, here, lambda: ["--extract-folder" if folder else "--extract-here", arc],
+                           lambda w: QFileDialog.getExistingDirectory(w, "풀 위치", _desktop()), folder=here)
+    if not dest:
+        return
     if folder:
-        dest = os.path.join(dest, formats.stem(arc))
-        if os.path.exists(dest) and not os.path.isdir(dest):  # a file already has that name (b.bin.xz -> b.bin)
-            i = 2
-            while os.path.exists(f"{dest} ({i})") and not os.path.isdir(f"{dest} ({i})"):
-                i += 1
-            dest = f"{dest} ({i})"  # a folder: "b.bin (2)", not "b (2).bin"
+        # an existing folder is not mixed into: "Kings (2)", like Bandizip; "b.bin (2)" for b.bin.xz, not "b (2).bin"
+        dest = into if into and dest == here and not os.path.exists(into) else unique_dir(
+            os.path.join(dest, formats.stem(arc)))
     try:
         z, pw = win._open(arc, None)
     except Exception as e:
@@ -1797,6 +1864,14 @@ def main():
             win.new_archive(paths, standalone=True, out=args[3])
         elif paths and args[0] == "--compress-dialog-list":
             win.new_archive(paths, standalone=True, ask=True)
+        return 0
+    if args[:1] == ["--extract-list"] and len(args) >= 3 and args[1] in ("here", "folder"):
+        # from the shell extension: --extract-list here|folder LIST [--out DIR]; DIR is the folder its menu
+        # named ("Kings (2)\에 압축 풀기"), given for a single archive only
+        paths = read_list(args[2])
+        into = args[4] if len(args) >= 5 and args[3] == "--out" and len(paths) == 1 else None
+        for arc in paths:
+            quick_extract(win, arc, args[1] == "folder", into)
         return 0
     if args and args[0] == "--archive" and len(args) > 1:
         paths = gather_paths("archive", args[1:])

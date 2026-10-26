@@ -338,8 +338,10 @@ def test_extract_verbs():
     with open(os.path.join(t, "pkg", "a.txt"), "w") as f:
         f.write("OLD")
     run_main(["--extract-folder", z])
-    check("--extract-folder existing file: original kept (rename mode)", open(os.path.join(t, "pkg", "a.txt")).read() == "OLD")
-    check("--extract-folder existing file: new copy 'a (2).txt'", os.path.exists(os.path.join(t, "pkg", "a (2).txt")), repr(os.listdir(os.path.join(t, "pkg"))))
+    check("--extract-folder, folder exists: original untouched", os.listdir(os.path.join(t, "pkg")) == ["a.txt"]
+          and open(os.path.join(t, "pkg", "a.txt")).read() == "OLD", repr(os.listdir(os.path.join(t, "pkg"))))
+    check("--extract-folder, folder exists: new folder 'pkg (2)' (Bandizip style)",
+          os.path.exists(os.path.join(t, "pkg (2)", "a.txt")), repr(os.listdir(t)))
 
 
 def test_main_window_ops():

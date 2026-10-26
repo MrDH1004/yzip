@@ -1,8 +1,9 @@
 // Headless probe for the yzip context-menu handler, going through the shell's own menu composition
 // (IShellFolder::GetUIObjectOf -> default context menu -> registered handlers), like Explorer does.
 // usage: probe list|defaultonly|invoke|invokedlg <path> [<path> ...]   (all paths in one folder)
-// prints one "ITEM\t<text>\t[icon]\t<verb>" line per top-level menu item (UTF-8);
-// "invoke" runs yzip's "<name>.zip으로 압축하기", "invokedlg" runs "yzip으로 압축하기...".
+// prints one "ITEM\t<text>\t[icon]\t<verb>" line per top-level menu item and "SEP" per separator (UTF-8);
+// "invoke" runs yzip's "<name>.zip으로 압축하기", "invokedlg" runs "yzip으로 압축하기...",
+// "invoke:<verb>" runs the item with that verb (e.g. invoke:yzip.extractfolder).
 #include <windows.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -59,20 +60,28 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 0; i < GetMenuItemCount(menu); i++) {
         wchar_t text[512] = L"";
         MENUITEMINFOW mii = {sizeof(mii)};
-        mii.fMask = MIIM_STRING | MIIM_ID | MIIM_BITMAP;
+        mii.fMask = MIIM_STRING | MIIM_ID | MIIM_BITMAP | MIIM_FTYPE;
         mii.dwTypeData = text;
         mii.cch = 512;
-        if (!GetMenuItemInfoW(menu, i, TRUE, &mii) || !text[0])
+        if (!GetMenuItemInfoW(menu, i, TRUE, &mii))
+            continue;
+        if (mii.fType & MFT_SEPARATOR) {
+            put(L"SEP");
+            continue;
+        }
+        if (!text[0])
             continue;
         // the verb, not the text, identifies our item (Bandizip adds an item with the very same text)
         wchar_t verb[128] = L"";
         if ((int)mii.wID >= (int)FIRST && (int)mii.wID < 0x7FFF)
             cm->GetCommandString(mii.wID - FIRST, GCS_VERBW, nullptr, (LPSTR)verb, 128);
         put(L"ITEM\t" + std::wstring(text) + L"\t" + (mii.hbmpItem ? L"[icon]" : L"") + L"\t" + verb);
-        if (lstrcmpW(verb, mode == L"invokedlg" ? L"yzip.compressdlg" : L"yzip.compress") == 0)
+        std::wstring want = mode == L"invokedlg" ? L"yzip.compressdlg"
+                          : mode.rfind(L"invoke:", 0) == 0 ? mode.substr(7) : L"yzip.compress";
+        if (lstrcmpW(verb, want.c_str()) == 0)
             target = (int)mii.wID;
     }
-    if (mode == L"invoke" || mode == L"invokedlg") {
+    if (mode.rfind(L"invoke", 0) == 0) {
         if (target < 0) {
             put(L"ERROR no yzip item");
             return 4;

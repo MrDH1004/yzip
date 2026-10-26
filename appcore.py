@@ -104,6 +104,50 @@ class Job:
         return not self.thread.is_alive()
 
 
+def can_write(folder: str) -> bool:
+    """False only when Windows refuses to create a file there (C:\\, Program Files: administrators only).
+    A folder that does not exist yet is judged by the nearest one that does."""
+    d = os.path.abspath(folder)
+    while not os.path.isdir(d) and os.path.dirname(d) != d:
+        d = os.path.dirname(d)
+    probe = os.path.join(d, f"~yzip{os.getpid()}_{time.time_ns() % 10**9}.tmp")
+    try:
+        os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except PermissionError:
+        return False
+    except OSError:
+        return True  # some other problem: let the job run and report it
+    try:
+        os.remove(probe)
+    except OSError:
+        pass
+    return True
+
+
+def run_elevated(args: list[str]) -> bool:
+    """Start yzip with args as administrator (Windows' UAC prompt). False when it could not start (the user
+    said no to the prompt)."""
+    import ctypes
+    import subprocess
+    import sys
+    if ctypes.windll.shell32.IsUserAnAdmin():  # already elevated: asking again would loop
+        return False
+    pre = [] if getattr(sys, "frozen", False) else [os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                 "yzip_gui.py")]
+    r = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, subprocess.list2cmdline(pre + args),
+                                            None, 1)
+    return r > 32
+
+
+def write_list(paths: list[str]) -> str:
+    """The same UTF-8 list file the shell extension writes, for handing a selection to another yzip process."""
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="yzip_sel_", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(p + "\n" for p in paths))
+    return path
+
+
 def read_list(path: str) -> list[str]:
     """The shell extension's UTF-8 list of selected items; the file is deleted after reading."""
     try:

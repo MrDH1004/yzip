@@ -80,10 +80,11 @@ KEY_DIR = r"Software\Classes\Directory\shell\yzip.Compress"
 KEY_HERE = r"Software\Classes\SystemFileAssociations\.zip\shell\yzip.Here"
 KEY_FOLDER = r"Software\Classes\SystemFileAssociations\.zip\shell\yzip.Folder"
 CLSID = "{7E3B1C52-9A4D-4F1E-B6C2-3D8A5F0E9C71}"
-cmds = {k: reg_cmd(k) for k in (KEY_HERE, KEY_FOLDER)}
-cmds[KEY_COMPRESS] = f'"{EXE}" --archive "%1"'  # fallback path when no shell extension is installed
-check("extract verbs point at dist\\yzip\\yzip.exe", all(EXE.lower() in c.lower() for c in cmds.values()), cmds)
+# the command lines of the static verbs, used when no shell extension is installed
+cmds = {KEY_HERE: f'"{EXE}" --extract-here "%1"', KEY_FOLDER: f'"{EXE}" --extract-folder "%1"',
+        KEY_COMPRESS: f'"{EXE}" --archive "%1"'}
 check("static compress verbs replaced by the shell extension", not key_exists(KEY_COMPRESS) and not key_exists(KEY_DIR))
+check("static extract verbs replaced by the shell extension", not key_exists(KEY_HERE) and not key_exists(KEY_FOLDER))
 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\CLSID\{CLSID}\InprocServer32") as k:
     dll = winreg.QueryValueEx(k, "")[0]
 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\yzip") as k:
@@ -201,7 +202,8 @@ with tempfile.TemporaryDirectory(prefix="yze_") as t:
              ("folder with a dot keeps its full name", [v12], "v1.2.zip" + S),
              ("'&' is escaped", [amp], "R&&D 보고서.zip" + S),
              ("3 files -> their folder's name", trio, "선택 폴더.zip" + S),
-             ("existing name -> (2)", [z], "pack (2).zip" + S)]
+             ("existing name -> (2)", [os.path.join(t, "pack.txt")], "pack (2).zip" + S)]
+    open(os.path.join(t, "pack.txt"), "w").close()  # pack.zip already exists next to it
     for name, paths, want in cases:
         code, items, raw = probe("list", paths)
         mine = yzip_item(items)
@@ -244,6 +246,27 @@ with tempfile.TemporaryDirectory(prefix="yze_") as t:
             names = sorted(e.name for e in a.entries() if not e.is_dir)
             ok7 = a.test() == []
         check("exe-made 7z is valid and complete", ok7 and any("c.txt" in n for n in names), names)
+    # extract items: only for archives, in the extract section (before the compress items), Bandizip-style
+    # "<folder>\에 압축 풀기" naming the real target, numbered when that folder exists
+    verbs = [it[2] for it in probe("list", [z])[1] if len(it) > 2 and it[2].startswith("yzip.")]
+    check("archive: extract items only, no compress items", verbs == ["yzip.extracthere", "yzip.extractfolder"], verbs)
+    check("non-archive: no extract items", not [it for it in probe("list", [files["b.bin"]])[1]
+                                                  if len(it) > 2 and it[2].startswith("yzip.extract")])
+    label = lambda: [it[0] for it in probe("list", [z])[1] if len(it) > 2 and it[2] == "yzip.extractfolder"]
+    check("folder item names the folder: 'pack\\에 압축 풀기'", label() == ["pack\\에 압축 풀기"], label())
+    code, _, raw = probe("invoke:yzip.extractfolder", [z], env)
+    got = os.path.join(t, "pack", "b.bin")
+    check("invoke '폴더에 압축 풀기': pack\\ with identical files", code == 0 and wait_done(got)
+          and sha(got) == sha(files["b.bin"]), (code, raw[-300:], os.listdir(t)))
+    check("folder exists -> 'pack (2)\\에 압축 풀기'", label() == ["pack (2)\\에 압축 풀기"], label())
+    code, _, raw = probe("invoke:yzip.extractfolder", [z], env)
+    got = os.path.join(t, "pack (2)", "b.bin")
+    check("invoke again: extracted into a new 'pack (2)', not mixed into pack", code == 0 and wait_done(got)
+          and sha(got) == sha(files["b.bin"]), (code, raw[-300:], os.listdir(t)))
+    code, _, raw = probe("invoke:yzip.extracthere", [z], env)  # 3 top items -> smart folder, numbered too
+    got = os.path.join(t, "pack (3)", "b.bin")
+    check("invoke '여기에 압축 풀기': smart folder numbered 'pack (3)'", code == 0 and wait_done(got)
+          and sha(got) == sha(files["b.bin"]), (code, raw[-300:], os.listdir(t)))
     time.sleep(1)
     left = [f for f in set(os.listdir(os.environ.get("TEMP"))) - before if f.startswith("yzip_sel_")]
     check("selection list files cleaned up", not left, left)
@@ -259,8 +282,7 @@ with tempfile.TemporaryDirectory(prefix="yze_") as t:
         arc = os.path.join(t, "pk_" + fid + formats.BY_ID[fid].ext)
         formats.create(fid, [src], arc)
         ext = ".gz" if fid == "tgz" else ".xz" if fid == "txz" else ".zst" if fid == "tzst" else ".7z"
-        key = rf"Software\Classes\SystemFileAssociations\{ext}\shell\yzip.Folder"
-        r = subprocess.run(reg_cmd(key).replace("%1", arc), env=env_for(local), capture_output=True, timeout=120)
+        r = subprocess.run(cmds[KEY_FOLDER].replace("%1", arc), env=env_for(local), capture_output=True, timeout=120)
         got = os.path.join(t, formats.stem(arc), "src", "b.bin")
         check(f"exe '폴더에 압축 풀기' on {os.path.basename(arc)}: files identical",
               r.returncode == 0 and os.path.exists(got) and sha(got) == sha(files["b.bin"]), (r.returncode, os.listdir(t)))
