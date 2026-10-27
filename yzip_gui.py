@@ -668,10 +668,31 @@ class SettingsDialog(QDialog):
         self.assoc_check.setAccessibleName("파일 연결하기")
         self.assoc_check.setChecked(assoc.enabled())
         lay.addWidget(self.assoc_check)
-        hint = QLabel("지원하는 압축 파일을 yzip으로 여는 연결을 등록합니다.")
+        hint = QLabel("아래 목록의 파일 확장자를 한꺼번에 yzip으로 여는 연결로 등록합니다.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #6e7781; font-size: 9pt;")
         lay.addWidget(hint)
+        list_title = QLabel(f"연결 가능한 파일 형식 ({len(assoc.TYPES)}개)")
+        list_title.setStyleSheet("font-weight: 600; color: #1f2328;")
+        lay.addWidget(list_title)
+        self.assoc_list = QTreeWidget()
+        self.assoc_list.setAccessibleName("연결 가능한 파일 형식 목록")
+        self.assoc_list.setHeaderLabels(["확장자", "파일 형식"])
+        self.assoc_list.setRootIsDecorated(False)
+        self.assoc_list.setSelectionMode(QTreeWidget.NoSelection)
+        self.assoc_list.setFocusPolicy(Qt.NoFocus)
+        self.assoc_list.setEditTriggers(QTreeWidget.NoEditTriggers)
+        self.assoc_list.setMinimumHeight(170)
+        self.assoc_list.setMaximumHeight(240)
+        self.assoc_list.setColumnWidth(0, 90)
+        self.assoc_list.header().setStretchLastSection(True)
+        for ext, label in assoc.TYPES.items():
+            self.assoc_list.addTopLevelItem(QTreeWidgetItem([ext, label]))
+        lay.addWidget(self.assoc_list)
+        note = QLabel("ISO·CAB 등 yzip이 열 수 있는 형식 중 일부는 Windows 기본 동작을 보존하기 위해 이 목록에서 제외되어 있습니다.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #6e7781; font-size: 8.5pt;")
+        lay.addWidget(note)
         lay.addStretch()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1053,7 +1074,7 @@ class Main(QMainWindow):
         return bar
 
     def start_update_check(self, manual: bool = False):
-        """Background check (once a day unless manual); a newer release shows the bar above the page."""
+        """Check in the background (once a day unless manual); startup checks are archive-launch only."""
         import threading
         import updater
         if not manual and not updater.due(load_settings()):
@@ -1170,14 +1191,14 @@ class Main(QMainWindow):
                 if pw is None:
                     return None, None
 
-    def open_archive(self, path: str):
+    def open_archive(self, path: str) -> bool:
         try:
             a, pw = self._open(path, None)
         except Exception as e:
             QMessageBox.critical(self, APP, f"열 수 없습니다: {e}")
-            return
+            return False
         if a is None:
-            return
+            return False
         with a:
             entries = a.entries()
             enc = a.needs_password()
@@ -1208,6 +1229,7 @@ class Main(QMainWindow):
         self._fill()
         self._set_page(True)
         self.status.showMessage("")
+        return True
 
     def _icon(self, name: str, is_dir: bool):
         from PySide6.QtCore import QFileInfo
@@ -1927,7 +1949,6 @@ def main():
         win.show()
         win.status.show()
         win.status.showMessage(f"yzip {__version__}(으)로 업데이트했습니다.", 10000)
-        win.start_update_check()
         return app.exec()
     if args[:1] in (["--archive-list"], ["--compress-dialog-list"]) and len(args) >= 2:
         # from the shell extension: every selected item in one UTF-8 list file.
@@ -1966,8 +1987,8 @@ def main():
         return 0
     elif args:
         win.show()
-        win.open_archive(args[0])
-        win.start_update_check()
+        if win.open_archive(args[0]):
+            win.start_update_check()
     else:
         win.show()
         win.start_update_check()

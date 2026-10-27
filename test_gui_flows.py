@@ -569,6 +569,10 @@ def test_settings():
         dlg.apply()
         check("settings: disabling file association unregisters all supported types",
               calls == ["register", "unregister"], calls)
+        listed = {dlg.assoc_list.topLevelItem(i).text(0) for i in range(dlg.assoc_list.topLevelItemCount())}
+        check("settings: lists every extension controlled by file association",
+              listed == set(assoc.TYPES) and dlg.assoc_list.topLevelItemCount() == len(assoc.TYPES),
+              (len(listed), len(assoc.TYPES), sorted(set(assoc.TYPES) - listed)))
         dlg.deleteLater()
     app.processEvents()
 
@@ -601,13 +605,31 @@ def test_update_prompt():
     app.processEvents()
 
 
+def test_update_check_scope():
+    win = mock.Mock()
+    win.open_archive.return_value = True
+    previous_argv = sys.argv[:]
+    try:
+        with mock.patch.object(gui, "Main", return_value=win):
+            sys.argv = ["yzip"]
+            gui.main()
+            check("update: plain app launch checks once", win.start_update_check.call_count == 1,
+                  win.start_update_check.call_count)
+            sys.argv = ["yzip", "sample.zip"]
+            gui.main()
+            check("update: archive launch checks after opening", win.start_update_check.call_count == 2,
+                  (win.open_archive.call_args, win.start_update_check.call_count))
+    finally:
+        sys.argv = previous_argv
+
+
 def sha_bytes(b):
     return hashlib.sha256(b).hexdigest()
 
 
 TESTS = {f.__name__: f for f in (test_run_job, test_archive_verb, test_extract_verbs, test_main_window_ops,
                                  test_drop_and_corrupt, test_formats_gui, test_simple_window, test_settings,
-                                 test_update_prompt)}
+                                 test_update_prompt, test_update_check_scope)}
 
 if __name__ == "__main__":
     # One test group per process (see run_headless_tests.py): several shown+destroyed Main windows in a

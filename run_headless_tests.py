@@ -6,7 +6,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 env = dict(os.environ, YZIP_GATHER_SCALE="0.05", PYTHONUTF8="1")
 GUI_GROUPS = ["test_run_job", "test_archive_verb", "test_extract_verbs", "test_main_window_ops", "test_drop_and_corrupt",
-              "test_formats_gui", "test_simple_window", "test_settings", "test_update_prompt"]
+              "test_formats_gui", "test_simple_window", "test_settings", "test_update_prompt", "test_update_check_scope"]
 
 jobs = [("core unit tests", [sys.executable, "-W", "ignore", "-m", "unittest", "test_ziplib"]),
         ("zip writer (zip64, AES, store, bz.exe/tar interop)", [sys.executable, "-W", "ignore", "-m", "unittest", "test_zipwriter"]),
