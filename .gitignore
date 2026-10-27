@@ -1,6 +1,7 @@
 # build output
 build/
 dist/
+nativearchive/target/
 shell/build/
 *.spec
 __pycache__/
@@ -8,6 +9,7 @@ __pycache__/
 
 # tool / IDE state
 .omc/
+.superpowers/
 .claude/
 .idea/
 .vscode/

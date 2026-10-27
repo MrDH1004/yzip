@@ -5,6 +5,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import formats
 import lzmamt
@@ -145,6 +146,43 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(formats.stem("b.zip.001"), "b")
         self.assertEqual(formats.with_format(r"C:\a\b.zip", "tgz"), r"C:\a\b.tar.gz")
         self.assertEqual(formats.with_format(r"C:\a\b.tar.gz", "7z"), r"C:\a\b.7z")
+
+    def test_native_formats_route_to_in_process_backend(self):
+        cases = {
+            "sample.rar": b"Rar!\x1a\x07\x01\x00",
+            "sample.cab": b"MSCF\x00\x00\x00\x00",
+            "sample.iso": b"\x00" * 32,
+            "sample.egg": b"EGGA\x00\x00\x00\x00",
+            "sample.alz": b"ALZ\x01\x00\x00\x00\x00",
+        }
+        sentinel = object()
+        with mock.patch("nativearchive.open_archive", return_value=sentinel) as opened:
+            for name, head in cases.items():
+                with self.subTest(name=name):
+                    path = os.path.join(self.root, name)
+                    with open(path, "wb") as f:
+                        f.write(head)
+                    self.assertIs(formats.open_any(path), sentinel)
+                    opened.assert_called_with(path, formats.detect(path), None)
+                    opened.reset_mock()
+
+    def test_native_backend_missing_is_actionable(self):
+        path = os.path.join(self.root, "sample.rar")
+        with open(path, "wb") as f:
+            f.write(b"Rar!\x1a\x07\x00")
+        with mock.patch("nativearchive.open_archive",
+                        side_effect=RuntimeError("native backend unavailable: libarchive.dll")):
+            with self.assertRaisesRegex(RuntimeError, "libarchive.dll"):
+                formats.open_any(path)
+
+    def test_zipx_stays_on_the_7z_compatibility_reader(self):
+        path = os.path.join(self.root, "sample.zipx")
+        with open(path, "wb") as f:
+            f.write(b"PK\x03\x04")
+        sentinel = object()
+        with mock.patch("cliarchive.CliArchive", return_value=sentinel) as opened:
+            self.assertIs(formats.open_any(path), sentinel)
+        opened.assert_called_once_with(path, "7zcli", None)
 
     def test_bandizip_interop(self):
         if not os.path.exists(BZ):

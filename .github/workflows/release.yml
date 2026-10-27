@@ -1,7 +1,7 @@
 name: release
 
-# Builds every tagged version on a GitHub-hosted runner from the tagged source, signs it through SignPath
-# (when the SignPath variables are set) and attaches the installer + its SHA-256 to the GitHub release.
+# Builds every tagged version on a GitHub-hosted runner from the tagged source and attaches
+# the intentionally unsigned installer + its SHA-256 to the GitHub release.
 # Repository settings once SignPath has approved the project:
 #   variables: SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG (yzip), SIGNPATH_POLICY_SLUG (release-signing)
 #   secret:    SIGNPATH_API_TOKEN
@@ -18,7 +18,8 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+      # SignPath Foundation approval is unavailable; do not submit or wait for signing.
+      SIGN: "false"
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
@@ -38,21 +39,34 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: python -c "import sys, version; sys.exit(0 if version.__version__ == '${{ github.ref_name }}'.lstrip('v') else 'version.py does not match the tag')"
 
-      - name: Bundled extractors (7-Zip, unegg, unalz)
+      - name: Bundled native archive backends
         shell: powershell
         run: .\fetch_tools.ps1
+
+      - name: Native payload sanity check
+        shell: powershell
+        run: |
+          $required = "tools\libarchive.dll", "tools\yzip_native.dll"
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "missing native payload: $path" }
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+            Write-Output "$path $hash"
+          }
+          $env:YZIP_LIBARCHIVE_DLL = (Resolve-Path "tools\libarchive.dll").Path
+          $env:YZIP_NATIVE_DLL = (Resolve-Path "tools\yzip_native.dll").Path
+          python -c "import ctypes, os; ctypes.WinDLL(os.environ['YZIP_LIBARCHIVE_DLL']); ctypes.WinDLL(os.environ['YZIP_NATIVE_DLL'])"
 
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
           YZIP_NO_UPDATE: "1"
-        run: python -W ignore -m unittest test_ziplib test_zipwriter test_formats test_moreformats test_updater
+        run: python -W ignore -m unittest test_ziplib test_zipwriter test_formats test_nativearchive test_moreformats test_updater
 
       - name: Build app (shell extension + exe)
         shell: powershell
         run: .\build.ps1 -Stage app
 
-      - name: Upload app for signing
+      - name: Upload unsigned app artifact
         id: upload-app
         uses: actions/upload-artifact@v4
         with:
@@ -84,7 +98,7 @@ jobs:
         shell: powershell
         run: .\build.ps1 -Stage installer
 
-      - name: Upload installer for signing
+      - name: Upload unsigned installer artifact
         id: upload-setup
         uses: actions/upload-artifact@v4
         with:
@@ -118,7 +132,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $tags = @(gh release list --limit 100 --json tagName --jq '.[].tagName')
           if ($tags -notcontains $tag) {
-            # every release page states the code signing policy (a SignPath Foundation requirement)
+            # every release page states that the current artifact is unsigned
             gh release create $tag --title "yzip $v" --notes-file .github\release-signing.md --generate-notes
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }

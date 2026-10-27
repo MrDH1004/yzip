@@ -16,3 +16,8 @@
   - 그 밖에는 사용자가 요청하지 않는 한 어떤 정보도 네트워크로 보내지 않습니다.
 
 소스 코드와 개인정보 처리 방침: https://github.com/MrDH1004/yzip
+
+압축 형식 처리
+  - RAR/RAR5, ISO/UDF, CAB, LHA/CPIO/RPM/DEB는 포함된 libarchive.dll을 프로세스 안에서 처리합니다.
+  - EGG/ALZ는 포함된 yzip_native.dll(Rust unegg/unalz)을 프로세스 안에서 처리합니다.
+  - RAR/EGG/ALZ는 해제 전용이며 해당 포맷 생성 기능은 제공하지 않습니다. 암호화 RAR은 감지 후 안전하게 거부합니다.

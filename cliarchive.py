@@ -1,11 +1,11 @@
-"""Formats read through the extractors bundled in tools\\ (see fetch_tools.ps1): 7-Zip for RAR, ISO, CAB, MSI,
-ARJ, LZH, WIM, ... and unegg / unalz for EGG / ALZ. Same API as ziplib.Archive (entries / needs_password /
+"""Formats read through the compatibility extractor bundled in tools\\ (see fetch_tools.ps1): 7-Zip for formats
+not covered by the in-process backends. Same API as ziplib.Archive (entries / needs_password /
 extract / test / close).
 
 The tool extracts into a hidden staging folder inside dest; the files are then moved into place through
 formats._Planner, so overwrite / skip / "name (2)", safe Windows names and "nothing changes when it fails" work
-as for the built-in formats. The tools run without a console and always get a password argument: unegg / unalz
-would otherwise prompt for one on the console and hang."""
+as for the built-in formats. Only the compatibility 7-Zip path is implemented here; RAR, ISO, CAB, EGG and ALZ
+are routed by formats.py to their in-process backends."""
 from __future__ import annotations
 
 import os
@@ -23,7 +23,7 @@ from ziplib import BadPassword, Cancelled, Entry
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
 _REPARSE = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 _HIDDEN = 0x2
-TOOL = {"7zcli": "7z.exe", "egg": "unegg.exe", "alz": "unalz.exe"}
+TOOL = {"7zcli": "7z.exe"}
 LABEL = {"egg": "EGG", "alz": "ALZ"}
 
 
@@ -108,6 +108,8 @@ def _staged_size(stage: str) -> int:
 
 class CliArchive:
     def __init__(self, path: str, kind: str, password: Optional[str] = None):
+        if kind != "7zcli":
+            raise ValueError(f"{kind} is handled by an in-process backend")
         self.path, self.kind, self.password = path, kind, password or None
         self.exe = tool_path(TOOL[kind])
         rc, text = _run(self._list_argv())

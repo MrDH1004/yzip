@@ -1,7 +1,6 @@
-"""Formats read through the bundled tools (cliarchive: 7-Zip, unegg, unalz) and the Python decoders (minifmt).
+"""Formats read through the bundled native/compatibility readers and the Python decoders (minifmt).
 
-The tool tests need tools\\ (fetch_tools.ps1) and skip without it. EGG / ALZ use the CC0 samples in testdata\\
-and compare with what the tool itself extracts; CAB and ISO are made with Windows' own makecab / IMAPI2.
+EGG / ALZ use the CC0 samples in testdata\\; CAB and ISO are made with Windows' own makecab / IMAPI2.
 The Python formats are built here by small encoders and round-tripped."""
 import base64
 import binascii
@@ -17,6 +16,7 @@ import sys
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -24,8 +24,6 @@ import formats  # noqa: E402
 from ziplib import BadPassword, Cancelled  # noqa: E402
 
 DATA = os.path.join(HERE, "testdata")
-TOOLS = os.path.join(HERE, "tools")
-HAVE_TOOLS = all(os.path.exists(os.path.join(TOOLS, n)) for n in ("7z.exe", "7z.dll", "unegg.exe", "unalz.exe"))
 
 
 def tree(d):
@@ -38,16 +36,6 @@ def tree(d):
     return out
 
 
-def tool_output(tool, arc, pw=None):
-    t = tempfile.mkdtemp()
-    subprocess.run([os.path.join(TOOLS, tool), "-q", "-P", pw or "-", "-d", t, arc], capture_output=True,
-                   stdin=subprocess.DEVNULL, timeout=120, creationflags=0x08000000)
-    try:
-        return tree(t)
-    finally:
-        shutil.rmtree(t, ignore_errors=True)
-
-
 class Tmp(unittest.TestCase):
     def setUp(self):
         self.t = tempfile.mkdtemp()
@@ -56,9 +44,8 @@ class Tmp(unittest.TestCase):
         shutil.rmtree(self.t, ignore_errors=True)
 
 
-@unittest.skipUnless(HAVE_TOOLS, "tools\\ missing: run fetch_tools.ps1")
-class ToolFormatTests(Tmp):
-    def roundtrip(self, name, tool, pw=None):
+class NativeFormatTests(Tmp):
+    def roundtrip(self, name, pw=None):
         path = os.path.join(DATA, name)
         with formats.open_any(path, pw) as a:
             self.assertTrue(a.entries())
@@ -67,33 +54,31 @@ class ToolFormatTests(Tmp):
             self.assertEqual(a.test(), [])
         got = tree(self.t)
         self.assertTrue(got)
-        self.assertEqual(got, tool_output(tool, formats.first_volume(path), pw))
         self.assertEqual(seen[-1][0], seen[-1][1], "progress ends at 100%")
         self.assertFalse([f for f in os.listdir(self.t) if f.startswith("~yzip")], "staging folder removed")
 
     def test_egg_samples(self):
         for n in ("normal.egg", "azo.egg", "solid.egg", "lzma5.egg"):
             with self.subTest(n):
-                self.roundtrip(n, "unegg.exe")
+                self.roundtrip(n)
                 shutil.rmtree(self.t)
                 os.makedirs(self.t)
 
     def test_alz_samples(self):
         for n in ("normal.alz", "bzip2.alz", "dir_tree.alz"):
             with self.subTest(n):
-                self.roundtrip(n, "unalz.exe")
+                self.roundtrip(n)
                 shutil.rmtree(self.t)
                 os.makedirs(self.t)
 
     def test_split_sets_open_from_any_volume(self):
-        self.roundtrip("split_store.vol2.egg", "unegg.exe")
+        self.roundtrip("split_store.vol2.egg")
         shutil.rmtree(self.t)
         os.makedirs(self.t)
-        self.roundtrip("split_store.a01", "unalz.exe")
+        self.roundtrip("split_store.a01")
 
     def test_encrypted(self):
-        for n, tool in (("enc_aes256.egg", "unegg.exe"), ("enc_lea_bzip2.egg", "unegg.exe"),
-                        ("enc_deflate.alz", "unalz.exe"), ("zip20.alz", "unalz.exe")):
+        for n in ("enc_aes256.egg", "enc_lea_bzip2.egg", "enc_deflate.alz", "zip20.alz"):
             with self.subTest(n):
                 p = os.path.join(DATA, n)
                 with formats.open_any(p) as a:
@@ -108,7 +93,7 @@ class ToolFormatTests(Tmp):
                 self.assertEqual(tree(self.t), {}, "nothing written by a failed run")
                 shutil.rmtree(self.t)
                 os.makedirs(self.t)
-                self.roundtrip(n, tool, "test1234")
+                self.roundtrip(n, "test1234")
                 shutil.rmtree(self.t)
                 os.makedirs(self.t)
 
@@ -143,7 +128,7 @@ class ToolFormatTests(Tmp):
 
     def test_cab_overwrite_modes_and_cancel(self):
         src, cab = self.make_cab()
-        self.assertEqual(formats.detect(cab), "7zcli")
+        self.assertEqual(formats.detect(cab), "cab")
         out = os.path.join(self.t, "out")
         with formats.open_any(cab) as a:
             self.assertEqual([e.name for e in a.entries()], ["data.bin"])
@@ -199,12 +184,11 @@ class ToolFormatTests(Tmp):
         self.assertEqual(os.listdir(out), ["locked.txt"])
 
     def test_member_names_cannot_become_tool_options(self):
-        import cliarchive
-        with formats.open_any(os.path.join(DATA, "normal.alz")) as a:
-            argv, _ = a._extract_argv(self.t, ["--output-dir=elsewhere", "-p"])
-        self.assertLess(argv.index("--"), argv.index("--output-dir=elsewhere"))
-        self.assertEqual(argv[argv.index("--") + 1], a.path)
-        self.assertTrue(cliarchive.tool_path("unalz.exe"))
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("native archive spawned a process")):
+            with formats.open_any(os.path.join(DATA, "normal.alz")) as archive:
+                out = os.path.join(self.t, "out")
+                archive.extract(out, names=["--output-dir=elsewhere", "-p"])
+        self.assertEqual(tree(out), {})
 
     def test_exe_and_docx_are_not_archives(self):
         p = os.path.join(self.t, "a.exe")

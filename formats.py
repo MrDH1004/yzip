@@ -3,8 +3,8 @@ same API as ziplib.Archive (entries / needs_password / extract / test / close / 
 
 create: zip (ziplib), 7z (lzmamt: multi-threaded LZMA2, AES-256 + encrypted names with a password), tar /
 tar.gz / tar.bz2 / tar.xz / tar.zst (tarfile; xz via lzmamt), and gz / bz2 / xz / zst for a single file. Reading detects the format from the
-file's first bytes, not its extension. Read only, through the bundled extractors (cliarchive): RAR, ISO, CAB,
-MSI, ARJ, LZH, WIM, ... (7-Zip), EGG (unegg), ALZ (unalz).
+file's first bytes, not its extension. RAR, ISO, CAB, LHA, CPIO, RPM and DEB use the bundled libarchive DLL in-process;
+EGG and ALZ use the bundled Rust module in-process. Other 7-Zip-only formats remain on the compatibility reader.
 """
 from __future__ import annotations
 
@@ -58,11 +58,15 @@ if zstd is None:
     FORMATS = [f for f in FORMATS if f.id not in ("tzst", "zst")]
 BY_ID = {f.id: f for f in FORMATS}
 
-# read through 7-Zip (cliarchive): archives proper, and disk images / installers. Only extensions are trusted:
-# 7-Zip also "opens" exe, dll, docx, ... (as sections or zip parts), which must stay ordinary files.
+# Read-only archive formats.  The formats in LIBARCHIVE_* are handled in-process;
+# the remaining 7-Zip-recognized extensions retain the legacy compatibility
+# backend until a matching native reader is added.
 SEVENZ_ARCHIVE_EXTS = [".rar", ".cab", ".arj", ".lzh", ".lha", ".zipx", ".z", ".taz", ".lzma", ".cpio", ".rpm",
                        ".deb"]
 SEVENZ_IMAGE_EXTS = [".iso", ".img", ".udf", ".msi", ".wim", ".swm", ".esd", ".vhd", ".vhdx", ".dmg"]
+LIBARCHIVE_ARCHIVE_EXTS = [".rar", ".cab", ".lzh", ".lha", ".cpio", ".rpm", ".deb"]
+LIBARCHIVE_IMAGE_EXTS = [".iso", ".img", ".udf"]
+NATIVE_EXT_TO_KIND = {e[1:]: e[1:] for e in LIBARCHIVE_ARCHIVE_EXTS + LIBARCHIVE_IMAGE_EXTS}
 # decoded in Python (minifmt)
 MINI_EXTS = {".br": "br", ".lz": "lz", ".lz4": "lz4", ".aes": "aes", ".uu": "uu", ".uue": "uu", ".xxe": "uu",
              ".asar": "asar"}
@@ -123,8 +127,7 @@ def with_format(path: str, fmt_id: str) -> str:
 # ---------- detection ----------
 
 def detect(path: str) -> str:
-    """'zip' | '7z' | 'tar' (any compression) | 'gz' | 'bz2' | 'xz' | 'zst', or through a bundled tool:
-    '7zcli' (RAR, ISO, CAB, ...) | 'egg' | 'alz'; ValueError if none of these."""
+    """Return the format id used by the appropriate in-process backend."""
     with open(path, "rb") as f:
         head = f.read(8)
     low = path.lower()
@@ -134,17 +137,19 @@ def detect(path: str) -> str:
         return "egg"
     if head[:4] == b"ALZ\x01":
         return "alz"
-    if head[:7] == b"Rar!\x1a\x07\x00" or head[:8] == b"Rar!\x1a\x07\x01\x00" or head[:4] == b"MSCF":
-        return "7zcli"
+    if head[:7] == b"Rar!\x1a\x07\x00" or head[:8] == b"Rar!\x1a\x07\x01\x00":
+        return "rar"
+    if head[:4] == b"MSCF":
+        return "cab"
     if low.endswith(".zipx") or low.endswith(".zip") and os.path.exists(path[:-4] + ".z01"):
-        return "7zcli"  # newer ZIP methods / a Bandizip-WinZip split set (.z01 .z02 ... .zip): 7-Zip reads both
+        return "7zcli"  # newer ZIP methods / a Bandizip-WinZip split set (.z01 .z02 ... .zip)
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
         return "zip"
     if head[:6] == b"7z\xbc\xaf\x27\x1c":
         return "7z"
     # before the tar probe: an ISO / disk image starts with zeroed sectors, which tarfile takes for an empty tar
     if low.endswith(tuple(SEVENZ_ARCHIVE_EXTS + SEVENZ_IMAGE_EXTS)):
-        return "7zcli"
+        return NATIVE_EXT_TO_KIND.get(os.path.splitext(low)[1][1:], "7zcli")
     try:
         with tarfile.open(path, "r:*"):
             return "tar"
@@ -176,9 +181,12 @@ def detect(path: str) -> str:
 def open_any(path: str, password: Optional[str] = None):
     path = first_volume(path)  # any volume of a set opens the whole set
     kind = detect(path)
-    if kind in ("7zcli", "egg", "alz"):
-        import cliarchive
-        return cliarchive.CliArchive(path, kind, password)
+    import nativearchive
+    if kind in nativearchive.NATIVE_KINDS:
+        return nativearchive.open_archive(path, kind, password)
+    if kind == "7zcli":
+        from cliarchive import CliArchive
+        return CliArchive(path, kind, password)
     if kind in ("uu", "asar"):
         import minifmt
         return minifmt.UUArchive(path) if kind == "uu" else minifmt.AsarArchive(path)

@@ -18,6 +18,8 @@
 
 ## Code signing policy
 
+Current release status: SignPath Foundation approval is unavailable, so published installers are intentionally unsigned and do not wait for signing.
+
 Windows 설치 파일과 프로그램 파일은 SignPath Foundation의 무료 오픈소스 코드 서명으로 서명할 예정입니다(신청 중).
 승인 후에는 다음 문구가 적용됩니다:
 
@@ -60,3 +62,11 @@ python run_headless_tests.py                          # 화면 없이 전체 테
 ```
 
 버전은 `version.py` 하나에서 관리합니다.
+
+## Native archive support
+
+RAR/RAR5, ISO/UDF, CAB, LHA, CPIO, RPM and DEB are read in-process through the bundled libarchive DLL.
+EGG and ALZ are read in-process through the bundled Rust module (`yzip_native.dll`, embedding `unegg` and `unalz`).
+RAR, EGG and ALZ remain extraction-only; archive creation is not advertised for those formats. Encrypted RAR is detected and rejected safely because the bundled reader does not implement RAR decryption.
+
+The remaining 7-Zip-only formats use the compatibility reader until a dedicated in-process backend is added.
