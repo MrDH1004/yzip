@@ -85,12 +85,12 @@ class UpdaterTests(unittest.TestCase):
         self.publish("v3.0.0", prerelease=True)
         self.assertIsNone(updater.check("1.0.0"))
 
-    def test_due_respects_setting_interval_and_test_switch(self):
+    def test_due_respects_setting_and_test_switch(self):
         os.environ.pop("YZIP_NO_UPDATE", None)
         self.assertTrue(updater.due({}))
         self.assertFalse(updater.due({"auto_update": False}))
         import time
-        self.assertFalse(updater.due({"update_checked_at": time.time() - 60}))
+        self.assertTrue(updater.due({"update_checked_at": time.time() - 60}))
         os.environ["YZIP_NO_UPDATE"] = "1"
         self.assertFalse(updater.due({}))
         os.environ.pop("YZIP_NO_UPDATE")

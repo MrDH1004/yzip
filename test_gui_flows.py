@@ -569,6 +569,12 @@ def test_settings():
         dlg.apply()
         check("settings: disabling file association unregisters all supported types",
               calls == ["register", "unregister"], calls)
+        check("settings: automatic update starts enabled",
+              dlg.auto_update_check.isChecked(), dlg.auto_update_check.isChecked())
+        dlg.auto_update_check.setChecked(False)
+        dlg.apply()
+        check("settings: automatic update preference is saved",
+              not gui.load_settings().get("auto_update", True), gui.load_settings())
         listed = {dlg.assoc_list.topLevelItem(i).text(0) for i in range(dlg.assoc_list.topLevelItemCount())}
         check("settings: lists every extension controlled by file association",
               listed == set(assoc.TYPES) and dlg.assoc_list.topLevelItemCount() == len(assoc.TYPES),

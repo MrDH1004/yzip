@@ -664,6 +664,14 @@ class SettingsDialog(QDialog):
         title = QLabel("yzip 환경설정")
         title.setStyleSheet("font-size: 11pt; font-weight: 600; color: #1f2328;")
         lay.addWidget(title)
+        self.auto_update_check = QCheckBox("업데이트 자동 확인")
+        self.auto_update_check.setAccessibleName("업데이트 자동 확인")
+        self.auto_update_check.setChecked(bool(load_settings().get("auto_update", True)))
+        lay.addWidget(self.auto_update_check)
+        update_hint = QLabel("yzip을 실행할 때마다 최신 버전을 확인하고, 새 버전이 있으면 팝업으로 묻습니다.")
+        update_hint.setWordWrap(True)
+        update_hint.setStyleSheet("color: #6e7781; font-size: 9pt;")
+        lay.addWidget(update_hint)
         self.assoc_check = QCheckBox("파일 연결하기")
         self.assoc_check.setAccessibleName("파일 연결하기")
         self.assoc_check.setChecked(assoc.enabled())
@@ -707,6 +715,7 @@ class SettingsDialog(QDialog):
             self.assoc.register()
         else:
             self.assoc.unregister()
+        save_setting("auto_update", self.auto_update_check.isChecked())
 
 
 class AssocDialog(QDialog):
@@ -1074,7 +1083,7 @@ class Main(QMainWindow):
         return bar
 
     def start_update_check(self, manual: bool = False):
-        """Check in the background (once a day unless manual); startup checks are archive-launch only."""
+        """Check in the background on every app launch when enabled; manual checks always run."""
         import threading
         import updater
         if not manual and not updater.due(load_settings()):
@@ -1093,8 +1102,6 @@ class Main(QMainWindow):
 
     def _update_result(self, rel, err, manual):
         from version import __version__
-        if err is None:
-            save_setting("update_checked_at", time.time())
         if rel is not None:
             self.release = rel
             self.upd_text.setText(f"새 버전 <b>yzip {rel.version}</b>이(가) 나왔습니다. 지금 버전: {__version__}")
@@ -1142,6 +1149,7 @@ class Main(QMainWindow):
             return
         try:
             dlg.apply()
+            self.a_auto_update.setChecked(dlg.auto_update_check.isChecked())
         except Exception as exc:
             log_exception(exc)
             QMessageBox.warning(self, APP, f"파일 연결을 변경하지 못했습니다.\n{exc}")

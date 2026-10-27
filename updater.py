@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -21,9 +20,6 @@ from typing import Callable, Optional
 from version import REPO, __version__
 
 UA = f"yzip/{__version__} (+https://github.com/{REPO})"
-CHECK_EVERY = 24 * 3600
-
-
 def api_url() -> str:
     return os.environ.get("YZIP_UPDATE_URL") or f"https://api.github.com/repos/{REPO}/releases/latest"
 
@@ -106,7 +102,5 @@ def launch_installer(path: str) -> None:
 
 
 def due(settings: dict) -> bool:
-    """Automatic check wanted now: on, not disabled for tests, and not checked within a day."""
-    if os.environ.get("YZIP_NO_UPDATE") or not settings.get("auto_update", True):
-        return False
-    return time.time() - float(settings.get("update_checked_at", 0)) >= CHECK_EVERY
+    """Whether automatic checking is enabled for the current app launch."""
+    return not os.environ.get("YZIP_NO_UPDATE") and bool(settings.get("auto_update", True))
