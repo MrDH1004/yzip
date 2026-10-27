@@ -22,12 +22,15 @@ class AssocTests(unittest.TestCase):
 
     def test_register_makes_windows_open_it_with_yzip(self):
         self.assertFalse(assoc.status([EXT], EXE)[EXT][0])
+        self.assertFalse(assoc.enabled([EXT]))
         assoc.register([EXT], exe=EXE)
         mine, name = assoc.status([EXT], EXE)[EXT]
         self.assertTrue(mine, name)
+        self.assertTrue(assoc.enabled([EXT]))
         self.assertEqual(assoc._get(rf"Software\Classes\{EXT}\OpenWithProgids", "yzip" + EXT), "")
         assoc.unregister([EXT])
         self.assertFalse(assoc.status([EXT], EXE)[EXT][0])
+        self.assertFalse(assoc.enabled([EXT]))
         self.assertIsNone(assoc._get(r"Software\Classes\yzip" + EXT))
 
     def test_previous_default_is_restored(self):

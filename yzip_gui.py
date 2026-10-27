@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 import formats
 import ziplib
 from appcore import load_settings, log_exception, log_path, outcome, read_list, save_setting, set_low_priority  # noqa: F401
+from version import __version__
 
 APP = "yzip"
 # progress window: one quiet surface, a thin accent bar, a single outlined action
@@ -646,6 +647,47 @@ class _Bridge(QObject):
     done = Signal(object, object)  # (result, error) from a worker thread, delivered on the GUI thread
 
 
+class SettingsDialog(QDialog):
+    """Application preferences that affect the per-user Windows integration."""
+
+    def __init__(self, parent):
+        import assoc
+        super().__init__(parent)
+        self.assoc = assoc
+        self.setWindowTitle("환경설정")
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(430)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(10)
+
+        title = QLabel("yzip 환경설정")
+        title.setStyleSheet("font-size: 11pt; font-weight: 600; color: #1f2328;")
+        lay.addWidget(title)
+        self.assoc_check = QCheckBox("파일 연결하기")
+        self.assoc_check.setAccessibleName("파일 연결하기")
+        self.assoc_check.setChecked(assoc.enabled())
+        lay.addWidget(self.assoc_check)
+        hint = QLabel("지원하는 압축 파일을 yzip으로 여는 연결을 등록합니다.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6e7781; font-size: 9pt;")
+        lay.addWidget(hint)
+        lay.addStretch()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("적용")
+        buttons.button(QDialogButtonBox.Cancel).setText("취소")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def apply(self):
+        if self.assoc_check.isChecked():
+            self.assoc.register()
+        else:
+            self.assoc.unregister()
+
+
 class AssocDialog(QDialog):
     """Which archive types open in yzip. Shows what Windows really uses per type (a choice the user made in
     Windows stays in force until changed in Settings, which the second button opens)."""
@@ -745,7 +787,7 @@ class Main(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP)
+        self.setWindowTitle(f"{APP} {__version__}")
         self.resize(860, 560)
         self.setMinimumSize(560, 380)
         self.setAcceptDrops(True)
@@ -829,14 +871,17 @@ class Main(QMainWindow):
         b_new.setObjectName("homeBtn")
         b_new.setIcon(glyph_icon(G_ADD, "#1f2328"))
         b_new.clicked.connect(lambda: self.new_archive())
-        for b in (b_open, b_new):
+        b_settings = self.settings_btn = QPushButton("  환경설정")
+        b_settings.setObjectName("homeBtn")
+        b_settings.clicked.connect(self.preferences)
+        for b in (b_open, b_new, b_settings):
             b.setCursor(Qt.PointingHandCursor)
             row.addWidget(b)
         row.addStretch()
         lay.addLayout(row)
         lay.addStretch(4)
         outer.addWidget(box)
-        foot = QLabel("ZIP · 7Z · TAR · GZ · BZ2 · XZ · ZST")
+        foot = QLabel(f"ZIP · 7Z · TAR · GZ · BZ2 · XZ · ZST  ·  yzip {__version__}")
         foot.setObjectName("homeFoot")
         foot.setAlignment(Qt.AlignCenter)
         outer.addSpacing(10)
@@ -944,6 +989,7 @@ class Main(QMainWindow):
         more.addSeparator()
         more.addAction(self.a_details)
         more.addSeparator()
+        more.addAction(self._act("환경설정…", self.preferences))
         more.addAction(self._act("압축 파일 연결…", self.associations))
         more.addAction(self._act("탐색기 우클릭 메뉴 등록", self.register_shell))
         more.addAction(self._act("탐색기 우클릭 메뉴 제거", self.unregister_shell))
@@ -1032,6 +1078,16 @@ class Main(QMainWindow):
             self.release = rel
             self.upd_text.setText(f"새 버전 <b>yzip {rel.version}</b>이(가) 나왔습니다. 지금 버전: {__version__}")
             self.upd_bar.show()
+            if not manual:
+                answer = QMessageBox.question(
+                    self,
+                    "yzip 업데이트",
+                    f"새 버전 yzip {rel.version}이 있습니다.\n지금 업데이트하시겠습니까?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if answer == QMessageBox.Yes:
+                    self.do_update()
         elif manual:
             if err is not None:
                 QMessageBox.warning(self, APP, f"업데이트를 확인하지 못했습니다.\n{err}")
@@ -1058,6 +1114,16 @@ class Main(QMainWindow):
 
     def associations(self):
         AssocDialog(self).exec()
+
+    def preferences(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        try:
+            dlg.apply()
+        except Exception as exc:
+            log_exception(exc)
+            QMessageBox.warning(self, APP, f"파일 연결을 변경하지 못했습니다.\n{exc}")
 
     # ----- drag & drop -----
     def _hot(self, on: bool):
@@ -1138,7 +1204,7 @@ class Main(QMainWindow):
         ratio = f" ({packed * 100 // tot}%)" if tot else ""
         self.arch_meta.setText(f"{label}  ·  파일 {files:,}개  ·  {fmt_size(tot)} → {fmt_size(packed)}{ratio}")
         self.lock.setVisible(bool(enc))
-        self.setWindowTitle(f"{os.path.basename(path)} - {APP}")
+        self.setWindowTitle(f"{os.path.basename(path)} - {APP} {__version__}")
         self._fill()
         self._set_page(True)
         self.status.showMessage("")

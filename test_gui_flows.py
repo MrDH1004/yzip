@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import time
+from unittest import mock
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["YZIP_NO_OPEN"] = "1"
@@ -20,7 +21,7 @@ MOD = os.environ.get("GUI_MOD", "yzip_gui")
 LIB = os.environ.get("LIB_MOD", "ziplib")
 
 from PySide6.QtCore import QTimer  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QDialogButtonBox, QInputDialog, QMessageBox, QPushButton)  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDialogButtonBox, QInputDialog, QLabel, QMessageBox, QPushButton)  # noqa: E402
 
 gui = importlib.import_module(MOD)
 ziplib = importlib.import_module(LIB)
@@ -491,6 +492,10 @@ def test_simple_window():
     check("simple: starts on the drop page, toolbar hidden, archive actions off",
           w.pages.currentIndex() == 0 and not w.toolbar.isVisible() and not w.a_extract.isEnabled(),
           (w.pages.currentIndex(), w.toolbar.isVisible()))
+    check("simple: home page exposes 환경설정", w.settings_btn.text().strip() == "환경설정", w.settings_btn.text())
+    check("simple: main window title and home footer show the version",
+          w.windowTitle() == f"yzip {gui.__version__}" and f"yzip {gui.__version__}" in w.findChild(QLabel, "homeFoot").text(),
+          (w.windowTitle(), w.findChild(QLabel, "homeFoot").text()))
     w.open_archive(z)
     app.processEvents()
     shown = [a.text() for a in w.toolbar.actions() if a.isVisible() and a.text()]
@@ -499,7 +504,8 @@ def test_simple_window():
           and w.more_btn.isVisible(), shown)
     more = [a.text() for a in w.more_btn.menu().actions() if a.text()]
     check("simple: add/delete/test/details/Explorer menu live under 더 보기",
-          {"파일 추가…", "선택 항목 삭제", "압축 파일 검사", "자세한 정보 보기", "탐색기 우클릭 메뉴 등록"} <= set(more), more)
+          {"파일 추가…", "선택 항목 삭제", "압축 파일 검사", "자세한 정보 보기", "환경설정…",
+           "탐색기 우클릭 메뉴 등록"} <= set(more), more)
     hidden = [w.tree.isColumnHidden(c) for c in range(len(w.COLS))]
     check("simple: only 이름/크기/수정한 날짜 shown by default", hidden == [False] * 3 + [True] * 4, hidden)
     w.a_details.trigger()
@@ -530,6 +536,8 @@ def test_simple_window():
     w.open_archive(z)  # reload (after add/delete) keeps the place; a new archive starts at its root
     check("browse: header shows format, file count and size; no lock for a plain archive",
           w.badge.text() == "ZIP" and "파일 3개" in w.arch_meta.text() and not w.lock.isVisibleTo(w), w.arch_meta.text())
+    check("browse: archive window title keeps the version",
+          w.windowTitle().endswith(f" - yzip {gui.__version__}"), w.windowTitle())
     keys = {a.shortcut().toString() for a in w.actions()}
     check("simple: shortcuts kept although the actions are hidden", {"Ctrl+E", "Ctrl+O", "Ctrl+N", "Del", "Ctrl+T"} <= keys, keys)
     dlg = gui.ExtractDialog(w, t, 0)
@@ -544,12 +552,62 @@ def test_simple_window():
     app.processEvents()
 
 
+def test_settings():
+    import assoc
+    calls = []
+    with mock.patch.object(assoc, "enabled", return_value=False), \
+            mock.patch.object(assoc, "register", side_effect=lambda: calls.append("register")), \
+            mock.patch.object(assoc, "unregister", side_effect=lambda: calls.append("unregister")):
+        dlg = gui.SettingsDialog(None)
+        check("settings: file association starts unchecked when yzip is not registered",
+              not dlg.assoc_check.isChecked(), dlg.assoc_check.isChecked())
+        dlg.assoc_check.setChecked(True)
+        dlg.apply()
+        check("settings: enabling file association registers all supported types",
+              calls == ["register"], calls)
+        dlg.assoc_check.setChecked(False)
+        dlg.apply()
+        check("settings: disabling file association unregisters all supported types",
+              calls == ["register", "unregister"], calls)
+        dlg.deleteLater()
+    app.processEvents()
+
+
+def test_update_prompt():
+    import updater
+
+    w = gui.Main()
+    w.show()
+    app.processEvents()
+    rel = updater.Release("1.0.12", "installer.exe", "installer.exe.sha256", "installer.exe", "", "")
+    with mock.patch.object(gui.QMessageBox, "question", return_value=gui.QMessageBox.No) as ask, \
+            mock.patch.object(w, "do_update") as do_update:
+        w._update_result(rel, None, False)
+        check("update: startup asks before downloading", ask.called and not do_update.called,
+              (ask.call_args, do_update.call_count))
+    with mock.patch.object(gui.QMessageBox, "question", return_value=gui.QMessageBox.Yes) as ask, \
+            mock.patch.object(w, "do_update") as do_update:
+        w._update_result(rel, None, False)
+        check("update: yes starts the installer flow", ask.called and do_update.call_count == 1,
+              (ask.call_args, do_update.call_count))
+    with mock.patch.object(gui.QMessageBox, "question") as ask, \
+            mock.patch.object(w, "do_update") as do_update:
+        w._update_result(rel, None, True)
+        check("update: manual check keeps the non-modal update bar",
+              not ask.called and not do_update.called and w.upd_bar.isVisible(),
+              (ask.call_count, do_update.call_count, w.upd_bar.isVisible()))
+    w.close()
+    w.deleteLater()
+    app.processEvents()
+
+
 def sha_bytes(b):
     return hashlib.sha256(b).hexdigest()
 
 
 TESTS = {f.__name__: f for f in (test_run_job, test_archive_verb, test_extract_verbs, test_main_window_ops,
-                                 test_drop_and_corrupt, test_formats_gui, test_simple_window)}
+                                 test_drop_and_corrupt, test_formats_gui, test_simple_window, test_settings,
+                                 test_update_prompt)}
 
 if __name__ == "__main__":
     # One test group per process (see run_headless_tests.py): several shown+destroyed Main windows in a

@@ -127,6 +127,11 @@ def unregister(exts=None) -> None:
     notify()
 
 
+def enabled(exts=None) -> bool:
+    """Whether yzip's per-user ProgID is registered for every requested extension."""
+    return all(_get(rf"Software\Classes\{progid(ext)}") is not None for ext in (exts or TYPES))
+
+
 def effective(ext: str) -> tuple[str, str]:
     """(executable, friendly app name) Windows opens ext with right now, '' when nothing is set."""
     out = []
