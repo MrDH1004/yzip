@@ -14,24 +14,15 @@
 
 [Releases](https://github.com/MrDH1004/yzip/releases)에서 `yzip-setup-X.Y.Z.exe`를 받아 실행합니다.
 사용자 계정에 설치되므로 관리자 권한이 필요 없고, 설치하면 우클릭 메뉴가 등록됩니다.
-코드 서명이 적용되기 전까지는 처음 실행할 때 SmartScreen 경고가 나올 수 있습니다 ([Code signing policy](#code-signing-policy)).
+현재 설치 파일은 코드 서명 없이 배포되므로 처음 실행할 때 SmartScreen 경고가 나올 수 있습니다.
 
 ## Code signing policy
 
-Current release status: SignPath Foundation approval is unavailable, so published installers are intentionally unsigned and do not wait for signing.
+현재 Windows 설치 파일과 프로그램 파일은 코드 서명 없이 배포합니다.
+당분간 별도의 코드 서명 서비스를 사용하지 않으며, 서명 적용 시 이 문서를 갱신합니다.
 
-Windows 설치 파일과 프로그램 파일은 SignPath Foundation의 무료 오픈소스 코드 서명으로 서명할 예정입니다(신청 중).
-승인 후에는 다음 문구가 적용됩니다:
-
-> Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)
-
-- **빌드**: 서명되는 파일은 모두 이 저장소의 태그된 소스에서 GitHub Actions(`.github/workflows/release.yml`)가 빌드합니다.
-  서명 대상은 yzip 자체 바이너리(`yzip.exe`, `yzipshell.dll`, 설치 파일)뿐이며, 함께 배포되는 외부 라이브러리
-  (Python, Qt 등)는 원본 그대로입니다.
-- **역할**
-  - Committers and reviewers: [MrDH1004](https://github.com/MrDH1004)
-  - Approvers: [MrDH1004](https://github.com/MrDH1004) — 모든 서명 요청은 릴리스마다 수동 승인합니다.
-- **개인정보**: 아래 [개인정보 처리 방침](#개인정보-처리-방침)을 따릅니다.
+모든 릴리스는 태그된 소스에서 GitHub Actions가 빌드하고, 설치 파일과 SHA-256 검증 파일을 함께 제공합니다.
+개인정보 처리는 아래 [개인정보 처리 방침](#개인정보-처리-방침)을 따릅니다.
 
 ## 개인정보 처리 방침
 
