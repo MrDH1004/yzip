@@ -80,6 +80,26 @@ class LoaderTests(unittest.TestCase):
             library.yz_accel_last_error.argtypes,
         )
 
+    def test_unicode_error_requery_is_bounded_and_handles_repeated_growth(self):
+        messages = ["a", "growing error", "7-Zip 로드 실패: 최종 오류"]
+        calls = {"count": 0}
+        library = FakeLibrary()
+
+        def last_error(buffer, size):
+            index = min(calls["count"], len(messages) - 1)
+            message = messages[index]
+            calls["count"] += 1
+            if buffer is not None and size:
+                buffer.value = message[: max(0, size - 1)]
+            return len(message) + 1
+
+        library.yz_accel_last_error = FakeFunction(last_error)
+        with mock.patch.object(archive_accel.ctypes, "WinDLL", return_value=library):
+            accelerator = archive_accel.load_accelerator(Path("growing-error.dll"))
+
+        self.assertEqual(messages[-1], accelerator.last_error())
+        self.assertLessEqual(calls["count"], 6)
+
     def test_cancellation_flag_uses_dll_atomic_cancel_entry_point(self):
         library = FakeLibrary()
         with mock.patch.object(archive_accel.ctypes, "WinDLL", return_value=library):
@@ -128,6 +148,20 @@ class BuildContractTests(unittest.TestCase):
         self.assertIn("source_sha256", script)
         self.assertNotIn(pins["source_url"], script)
         self.assertNotIn(pins["source_sha256"], script)
+
+    def test_official_crc_sources_are_hash_pinned_and_built(self):
+        root = Path(__file__).parent
+        pins = json.loads(
+            (root / "nativeaccel" / "7zip-pins.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {"C/7zCrc.h", "C/7zCrc.c", "C/7zCrcOpt.c"},
+            set(pins["crc_source_sha256"]),
+        )
+        script = (root / "nativeaccel" / "build.ps1").read_text(encoding="utf-8")
+        self.assertIn("crc_source_sha256", script)
+        self.assertIn("7zCrc.c", script)
+        self.assertIn("7zCrcOpt.c", script)
 
     def test_required_native_test_mode_fails_when_dll_is_missing(self):
         missing = Path(tempfile.gettempdir()) / "required-yzip-accel-is-missing.dll"

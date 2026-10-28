@@ -10,5 +10,10 @@
     "CPP/7zip/IStream.h": "c0c8f8df90ec555b5fb73658638edcaf2029c684d7e0a341d048008b5b25bd47",
     "CPP/7zip/IPassword.h": "2e84e7c3c0f83fd968c1c01df8a0f0153b2af4548a40d837e4d6b001c7e34cb9",
     "CPP/Common/MyCom.h": "6dea15b95f66427cf468c91137a23dbdc5f4638a90e06d5b53e5fbcbe36fa58f"
+  },
+  "crc_source_sha256": {
+    "C/7zCrc.h": "39931db69404c46c018f5241845c02ab161f166de1dada882df87db5b3581b7f",
+    "C/7zCrc.c": "d13ee23c3e66e0b7dbdaa91cdfa8a154145847421c1ab5ea131f536ab45e420b",
+    "C/7zCrcOpt.c": "1489340e2441a6b9828ed444832ec95bfaac730ca19654f7dabd01355e8b3efd"
   }
 }

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import ctypes
 import enum
+import functools
+import hashlib
+import json
 import os
 import threading
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 
@@ -21,6 +24,8 @@ class AccelStatus(enum.IntEnum):
     UNSUPPORTED = 2
     ERROR = 3
     CORRUPT = 4
+    UNAVAILABLE = 5
+    IO_ERROR = 6
 
 
 @dataclass(frozen=True)
@@ -32,9 +37,24 @@ class NativeZipJob:
 
 
 @dataclass(frozen=True)
+class NativeMetrics:
+    callback_calls: int = 0
+    lookup_calls: int = 0
+    write_calls: int = 0
+    write_bytes: int = 0
+    callback_ticks: int = 0
+    write_ticks: int = 0
+    crc_ticks: int = 0
+    qpc_frequency: int = 0
+    close_hresult: int = 0
+    free_library_error: int = 0
+
+
+@dataclass(frozen=True)
 class NativeResult:
     status: AccelStatus
     completed_bytes: int
+    metrics: NativeMetrics = field(default_factory=NativeMetrics)
 
 
 class _CNativeZipJob(ctypes.Structure):
@@ -50,6 +70,21 @@ class _CNativeProgress(ctypes.Structure):
     _fields_ = [
         ("completed_bytes", ctypes.c_uint64),
         ("total_bytes", ctypes.c_uint64),
+    ]
+
+
+class _CNativeMetrics(ctypes.Structure):
+    _fields_ = [
+        ("callback_calls", ctypes.c_uint64),
+        ("lookup_calls", ctypes.c_uint64),
+        ("write_calls", ctypes.c_uint64),
+        ("write_bytes", ctypes.c_uint64),
+        ("callback_ticks", ctypes.c_uint64),
+        ("write_ticks", ctypes.c_uint64),
+        ("crc_ticks", ctypes.c_uint64),
+        ("qpc_frequency", ctypes.c_uint64),
+        ("close_hresult", ctypes.c_uint32),
+        ("free_library_error", ctypes.c_uint32),
     ]
 
 
@@ -85,16 +120,24 @@ class Accelerator:
                 ctypes.POINTER(ctypes.c_uint32),
             ]
             extract_zip.restype = ctypes.c_uint32
+        metrics = getattr(library, "yz_accel_last_zip_metrics", None)
+        if metrics is not None:
+            metrics.argtypes = [ctypes.POINTER(_CNativeMetrics)]
+            metrics.restype = ctypes.c_uint32
 
     def last_error(self) -> str:
         required = int(self._library.yz_accel_last_error(None, 0))
         if required <= 1:
             return ""
-        buffer = ctypes.create_unicode_buffer(required)
-        actual = int(self._library.yz_accel_last_error(buffer, required))
-        if actual > required:
-            buffer = ctypes.create_unicode_buffer(actual)
-            self._library.yz_accel_last_error(buffer, actual)
+        buffer = None
+        for _attempt in range(4):
+            buffer = ctypes.create_unicode_buffer(required)
+            actual = int(self._library.yz_accel_last_error(buffer, required))
+            if actual <= required:
+                break
+            required = actual
+        if buffer is None:
+            return ""
         return buffer.value
 
     def extract_zip(
@@ -105,6 +148,9 @@ class Accelerator:
         cancel: Callable[[], bool] | None,
     ) -> NativeResult:
         native_jobs = list(jobs)
+        runtime_7z = _validated_7z_path()
+        if runtime_7z is None:
+            return NativeResult(AccelStatus.UNAVAILABLE, 0)
         array_type = _CNativeZipJob * len(native_jobs)
         c_jobs = array_type(
             *(
@@ -140,7 +186,7 @@ class Accelerator:
         try:
             raw_status = int(
                 self._library.yz_accel_extract_zip(
-                    str(_default_7z_path()),
+                    str(runtime_7z),
                     os.fspath(source),
                     c_jobs,
                     len(native_jobs),
@@ -163,7 +209,16 @@ class Accelerator:
             status = AccelStatus.ERROR
         if cancelled_after_completion:
             status = AccelStatus.CANCELLED
-        return NativeResult(status, int(counters.completed_bytes))
+        metrics = NativeMetrics()
+        metrics_function = getattr(self._library, "yz_accel_last_zip_metrics", None)
+        if metrics_function is not None:
+            native_metrics = _CNativeMetrics()
+            if int(metrics_function(ctypes.pointer(native_metrics))) != 0:
+                metrics = NativeMetrics(*(
+                    int(getattr(native_metrics, name))
+                    for name, _ctype in _CNativeMetrics._fields_
+                ))
+        return NativeResult(status, int(counters.completed_bytes), metrics)
 
 
 class CancellationFlag:
@@ -203,6 +258,49 @@ def _default_7z_path() -> Path:
     if configured:
         return Path(configured)
     return Path(__file__).resolve().parent / "tools" / "7z.dll"
+
+
+@functools.lru_cache(maxsize=1)
+def _expected_7z_sha256() -> str:
+    root = Path(__file__).resolve().parent
+    candidates = (
+        root / "nativeaccel" / "7zip-pins.json",
+        root / "tools" / "7zip-pins.json",
+    )
+    for candidate in candidates:
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+            return str(document["binary_sha256"]["7z.dll"]).lower()
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, OSError):
+            continue
+    return ""
+
+
+@functools.lru_cache(maxsize=8)
+def _runtime_7z_matches_pin(path: str, size: int, modified_ns: int) -> bool:
+    del size, modified_ns
+    expected = _expected_7z_sha256()
+    if not expected:
+        return False
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as runtime_dll:
+            for block in iter(lambda: runtime_dll.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return False
+    return digest.hexdigest().lower() == expected
+
+
+def _validated_7z_path() -> Path | None:
+    path = _default_7z_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not _runtime_7z_matches_pin(str(path.resolve()), stat.st_size, stat.st_mtime_ns):
+        return None
+    return path
 
 
 def load_accelerator(path: os.PathLike[str] | str | None = None) -> Accelerator | None:

@@ -8,17 +8,20 @@
 
 #include "CPP/Common/MyInitGuid.h"
 #include "CPP/7zip/Archive/IArchive.h"
+#include "C/7zCrc.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
 thread_local std::wstring g_last_error;
+thread_local yz_zip_metrics g_last_metrics{};
 static_assert(sizeof(std::uint32_t) == sizeof(LONG));
 static_assert(sizeof(std::uint64_t) == sizeof(LONG64));
 
@@ -30,6 +33,27 @@ const GUID kZipClassId = {
 };
 
 using CreateObjectFunction = HRESULT(WINAPI*)(const GUID*, const GUID*, void**);
+
+std::uint64_t performance_counter() noexcept {
+    LARGE_INTEGER value{};
+    return QueryPerformanceCounter(&value) ? static_cast<std::uint64_t>(value.QuadPart) : 0;
+}
+
+class ScopedMetric final {
+public:
+    explicit ScopedMetric(std::uint64_t* target) noexcept
+        : target_(target), started_(performance_counter()) {}
+    ~ScopedMetric() {
+        const std::uint64_t finished = performance_counter();
+        if (finished >= started_) {
+            *target_ += finished - started_;
+        }
+    }
+
+private:
+    std::uint64_t* target_;
+    std::uint64_t started_;
+};
 
 void set_error(const wchar_t* message) {
     g_last_error = message == nullptr ? L"native ZIP extraction failed" : message;
@@ -44,24 +68,9 @@ bool is_cancelled(const volatile std::uint32_t* flag) {
     return InterlockedCompareExchange(value, 0L, 0L) != 0;
 }
 
-std::uint32_t crc32_update(std::uint32_t crc, const Byte* data, UInt32 size) {
-    static const std::array<std::uint32_t, 256> table = [] {
-        std::array<std::uint32_t, 256> values{};
-        for (std::uint32_t value = 0; value < values.size(); ++value) {
-            std::uint32_t entry = value;
-            for (unsigned bit = 0; bit < 8; ++bit) {
-                const std::uint32_t mask = 0U - (entry & 1U);
-                entry = (entry >> 1U) ^ (0xEDB88320U & mask);
-            }
-            values[value] = entry;
-        }
-        return values;
-    }();
-    crc = ~crc;
-    for (UInt32 index = 0; index < size; ++index) {
-        crc = table[(crc ^ data[index]) & 0xFFU] ^ (crc >> 8U);
-    }
-    return ~crc;
+void initialize_crc() {
+    static std::once_flag initialized;
+    std::call_once(initialized, CrcGenerateTable);
 }
 
 class InFileStream final : public IInStream {
@@ -149,7 +158,8 @@ public:
         yz_progress_counters* progress,
         volatile std::uint32_t* cancellation_flag,
         bool* corrupt,
-        bool* io_failed) noexcept
+        bool* io_failed,
+        yz_zip_metrics* metrics) noexcept
         : refs_(1),
           handle_(CreateFileW(
               job.staging_path,
@@ -166,8 +176,11 @@ public:
           cancellation_flag_(cancellation_flag),
           corrupt_(corrupt),
           io_failed_(io_failed),
+          metrics_(metrics),
           size_(0),
-          crc_(0) {}
+          crc_(CRC_INIT_VAL) {
+        initialize_crc();
+    }
 
     ~StagingOutStream() {
         if (handle_ != INVALID_HANDLE_VALUE) {
@@ -177,7 +190,7 @@ public:
 
     bool valid() const noexcept { return handle_ != INVALID_HANDLE_VALUE; }
     bool verified() const noexcept {
-        return size_ == expected_size_ && crc_ == expected_crc_;
+        return size_ == expected_size_ && CRC_GET_DIGEST(crc_) == expected_crc_;
     }
 
     STDMETHOD(QueryInterface)(REFIID iid, void** object) noexcept override {
@@ -234,13 +247,32 @@ public:
             observed = prior;
         }
         DWORD written = 0;
-        if (!WriteFile(handle_, data, size, &written, nullptr) || written != size) {
+        ++metrics_->write_calls;
+        metrics_->write_bytes += size;
+        const std::uint64_t write_started = performance_counter();
+        const BOOL write_succeeded = WriteFile(handle_, data, size, &written, nullptr);
+        const std::uint64_t write_finished = performance_counter();
+        if (write_finished >= write_started) {
+            metrics_->write_ticks += write_finished - write_started;
+        }
+        if (!write_succeeded) {
+            const DWORD write_error = GetLastError();
             *io_failed_ = true;
             InterlockedExchangeAdd64(completed, -static_cast<LONG64>(size));
-            return HRESULT_FROM_WIN32(GetLastError());
+            return HRESULT_FROM_WIN32(write_error);
+        }
+        if (written != size) {
+            *io_failed_ = true;
+            InterlockedExchangeAdd64(completed, -static_cast<LONG64>(size));
+            return HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
         }
         size_ += written;
-        crc_ = crc32_update(crc_, static_cast<const Byte*>(data), written);
+        const std::uint64_t crc_started = performance_counter();
+        crc_ = CrcUpdate(crc_, data, written);
+        const std::uint64_t crc_finished = performance_counter();
+        if (crc_finished >= crc_started) {
+            metrics_->crc_ticks += crc_finished - crc_started;
+        }
         *processed_size = written;
         return S_OK;
     }
@@ -255,6 +287,7 @@ private:
     volatile std::uint32_t* cancellation_flag_;
     bool* corrupt_;
     bool* io_failed_;
+    yz_zip_metrics* metrics_;
     std::uint64_t size_;
     std::uint32_t crc_;
 };
@@ -276,7 +309,13 @@ public:
           current_(nullptr),
           operation_failed_(false),
           corrupt_(false),
-          io_failed_(false) {}
+          io_failed_(false),
+          metrics_(&g_last_metrics) {
+        lookup_.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            lookup_[jobs[index].source_index] = &jobs[index];
+        }
+    }
 
     ~ExtractCallback() { release_current(); }
 
@@ -325,6 +364,8 @@ public:
         UInt32 index,
         ISequentialOutStream** stream,
         Int32 ask_mode) noexcept override {
+        ScopedMetric metric(&metrics_->callback_ticks);
+        ++metrics_->callback_calls;
         if (stream == nullptr) {
             return E_POINTER;
         }
@@ -342,7 +383,13 @@ public:
             return E_FAIL;
         }
         current_ = new (std::nothrow) StagingOutStream(
-            *job, output_limit_, progress_, cancellation_flag_, &corrupt_, &io_failed_);
+            *job,
+            output_limit_,
+            progress_,
+            cancellation_flag_,
+            &corrupt_,
+            &io_failed_,
+            metrics_);
         if (current_ == nullptr) {
             return E_OUTOFMEMORY;
         }
@@ -373,12 +420,9 @@ public:
 
 private:
     const yz_zip_job* find_job(const UInt32 index) const noexcept {
-        for (std::size_t job = 0; job < count_; ++job) {
-            if (jobs_[job].source_index == index) {
-                return &jobs_[job];
-            }
-        }
-        return nullptr;
+        ++metrics_->lookup_calls;
+        const auto found = lookup_.find(index);
+        return found == lookup_.end() ? nullptr : found->second;
     }
 
     void release_current() noexcept {
@@ -398,6 +442,8 @@ private:
     bool operation_failed_;
     bool corrupt_;
     bool io_failed_;
+    yz_zip_metrics* metrics_;
+    std::unordered_map<UInt32, const yz_zip_job*> lookup_;
 };
 }  // namespace
 
@@ -446,6 +492,11 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
     yz_progress_counters* progress,
     volatile std::uint32_t* cancellation_flag) noexcept {
     g_last_error.clear();
+    g_last_metrics = {};
+    LARGE_INTEGER qpc_frequency{};
+    if (QueryPerformanceFrequency(&qpc_frequency) && qpc_frequency.QuadPart > 0) {
+        g_last_metrics.qpc_frequency = static_cast<std::uint64_t>(qpc_frequency.QuadPart);
+    }
     if (seven_zip_dll == nullptr || source == nullptr || jobs == nullptr ||
         progress == nullptr || job_count == 0 ||
         job_count > std::numeric_limits<UInt32>::max()) {
@@ -463,7 +514,7 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (module == nullptr) {
         set_error(L"could not load pinned 7z.dll");
-        return YZ_ACCEL_ERROR;
+        return YZ_ACCEL_UNAVAILABLE;
     }
     std::uint32_t status = YZ_ACCEL_ERROR;
     try {
@@ -471,12 +522,14 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
             GetProcAddress(module, "CreateObject"));
         if (create_object == nullptr) {
             set_error(L"7z.dll does not export CreateObject");
+            status = YZ_ACCEL_UNAVAILABLE;
         } else {
             IInArchive* archive = nullptr;
             HRESULT result = create_object(
                 &kZipClassId, &IID_IInArchive, reinterpret_cast<void**>(&archive));
             if (result != S_OK || archive == nullptr) {
                 set_error(L"7z.dll could not create the ZIP handler");
+                status = YZ_ACCEL_UNAVAILABLE;
             } else {
                 InFileStream* input = new (std::nothrow) InFileStream(source);
                 if (input == nullptr || !input->valid()) {
@@ -511,6 +564,9 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
                                        (result != S_OK && !callback->io_failed())) {
                                 set_error(L"7z.dll reported corrupt ZIP data");
                                 status = YZ_ACCEL_CORRUPT;
+                            } else if (callback->io_failed()) {
+                                set_error(L"native ZIP staging I/O failed");
+                                status = YZ_ACCEL_IO_ERROR;
                             } else if (result != S_OK || callback->operation_failed()) {
                                 set_error(L"7z.dll reported a ZIP extraction error");
                             } else {
@@ -518,7 +574,12 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
                             }
                             callback->Release();
                         }
-                        archive->Close();
+                        const HRESULT close_result = archive->Close();
+                        g_last_metrics.close_hresult = static_cast<std::uint32_t>(close_result);
+                        if (close_result != S_OK && status == YZ_ACCEL_OK) {
+                            set_error(L"7z.dll failed to close the ZIP archive");
+                            status = YZ_ACCEL_ERROR;
+                        }
                     }
                 }
                 archive->Release();
@@ -528,6 +589,20 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
         set_error(L"unexpected exception in native ZIP extraction");
         status = YZ_ACCEL_ERROR;
     }
-    FreeLibrary(module);
+    if (!FreeLibrary(module)) {
+        g_last_metrics.free_library_error = GetLastError();
+        if (g_last_error.empty()) {
+            set_error(L"7z.dll cleanup failed after ZIP extraction");
+        }
+    }
     return status;
+}
+
+std::uint32_t YZ_ACCEL_CALL yz_accel_last_zip_metrics(
+    yz_zip_metrics* metrics) noexcept {
+    if (metrics == nullptr) {
+        return 0;
+    }
+    *metrics = g_last_metrics;
+    return 1;
 }

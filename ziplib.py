@@ -9,6 +9,7 @@ import struct
 import tempfile
 import threading
 import time
+import warnings
 import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -120,6 +121,26 @@ def safe_target(root: str, name: str) -> Optional[str]:
     except ValueError:  # another drive
         return None
     return target
+
+
+def _verify_native_staging(job: NativeZipJob, name: str, cancel) -> None:
+    size = 0
+    crc = 0
+    with open(job.staging_path, "rb") as extracted:
+        while True:
+            if cancel and cancel():
+                raise Cancelled()
+            data = extracted.read(1 << 20)
+            if not data:
+                break
+            size += len(data)
+            if size > job.expected_size:
+                raise zipfile.BadZipFile(f"size mismatch: {name}")
+            crc = zlib.crc32(data, crc)
+    if cancel and cancel():
+        raise Cancelled()
+    if size != job.expected_size or crc != job.expected_crc:
+        raise zipfile.BadZipFile(f"CRC mismatch: {name}")
 
 
 # ---------- split volumes (name.zip.001, .002 ...) ----------
@@ -274,67 +295,106 @@ class Archive:
             return None
         return accelerator
 
-    def _extract_native(self, accelerator, jobs, progress, cancel):
+    def _extract_native(self, accelerator, jobs, total, skipped, progress, cancel):
         native_jobs = []
-        for index, name, info, target in jobs:
+        for index, name, info, target, _target_existed in jobs:
             native_jobs.append(NativeZipJob(index, part_path(target), info.file_size, info.CRC))
+        staged = {job.staging_path for job in native_jobs}
+
+        def native_progress(done, _native_total, name):
+            if progress:
+                progress(min(total, skipped + done), total, name)
+
+        if progress:
+            progress(skipped, total, "")
         try:
-            result = accelerator.extract_zip(self._real, native_jobs, progress, cancel)
+            result = accelerator.extract_zip(self._real, native_jobs, native_progress, cancel)
+            if result.status == AccelStatus.UNAVAILABLE:
+                return False
             if result.status == AccelStatus.CANCELLED:
                 raise Cancelled()
             if result.status == AccelStatus.CORRUPT:
                 raise zipfile.BadZipFile("native ZIP CRC or size validation failed")
+            if result.status == AccelStatus.IO_ERROR:
+                detail = accelerator.last_error() if hasattr(accelerator, "last_error") else ""
+                raise OSError(detail or "native ZIP I/O failed")
             if result.status != AccelStatus.OK:
                 raise NativeExtractionError(
                     f"native ZIP extraction failed with status {result.status.name}"
                 )
-            for job, (_index, name, info, _target) in zip(native_jobs, jobs):
-                size = 0
-                crc = 0
-                with open(job.staging_path, "rb") as extracted:
-                    while True:
-                        data = extracted.read(1 << 20)
-                        if not data:
-                            break
-                        size += len(data)
-                        if size > info.file_size:
-                            raise zipfile.BadZipFile(f"size mismatch: {name}")
-                        crc = zlib.crc32(data, crc)
-                if size != info.file_size or crc != info.CRC:
-                    raise zipfile.BadZipFile(f"CRC mismatch: {name}")
+
+            workers = max(1, min(runtimeconfig.worker_count(8), len(native_jobs)))
+            with ThreadPoolExecutor(workers) as pool:
+                futures = [
+                    pool.submit(_verify_native_staging, job, planned[1], cancel)
+                    for job, planned in zip(native_jobs, jobs)
+                ]
+                try:
+                    for future in futures:
+                        future.result()
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
+            if cancel and cancel():
+                raise Cancelled()
 
             published = []
             backups = []
             try:
-                for job, (_index, _name, _info, target) in zip(native_jobs, jobs):
+                for job, (_index, _name, _info, target, target_existed) in zip(native_jobs, jobs):
+                    if cancel and cancel():
+                        raise Cancelled()
                     backup = None
-                    if os.path.exists(target):
+                    if target_existed:
                         backup = part_path(target) + ".native-backup"
                         os.replace(target, backup)
                         backups.append((backup, target))
                     finish_part(job.staging_path, target)
-                    published.append((target, backup))
+                    staged.discard(job.staging_path)
+                    published.append(target)
+                    if cancel and cancel():
+                        raise Cancelled()
             except BaseException:
-                for target, _backup in reversed(published):
-                    if os.path.exists(target):
+                for target in reversed(published):
+                    try:
                         os.remove(target)
+                    except FileNotFoundError:
+                        pass
                 for backup, target in reversed(backups):
-                    if os.path.exists(backup):
+                    try:
                         os.replace(backup, target)
+                    except FileNotFoundError:
+                        pass
                 raise
             for backup, _target in backups:
-                if os.path.exists(backup):
+                try:
                     os.remove(backup)
-            for _index, _name, info, target in jobs:
+                except OSError as error:
+                    warnings.warn(
+                        f"native ZIP backup cleanup failed; recoverable backup kept at {backup}: {error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            for _index, _name, info, target, _target_existed in jobs:
                 try:
                     timestamp = time.mktime(info.date_time + (0, 0, -1))
                     os.utime(target, (timestamp, timestamp))
                 except (OverflowError, ValueError, OSError):
                     pass
+            return True
         finally:
-            for job in native_jobs:
-                if os.path.exists(job.staging_path):
-                    os.remove(job.staging_path)
+            for staging_path in staged:
+                try:
+                    os.remove(staging_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    warnings.warn(
+                        f"native ZIP staging cleanup failed at {staging_path}: {error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
     def extract(self, dest: str, names: Optional[Iterable[str]] = None,
                 progress: Optional[Progress] = None, cancel: Optional[Callable[[], bool]] = None,
@@ -372,21 +432,26 @@ class Archive:
                 if overwrite == "rename":
                     target = free_name(target)
                     taken.add(target.lower())
-                jobs.append((source_indices[id(info)], n, info, target))
+                    target_existed = False
+                elif overwrite is False:
+                    target_existed = False
+                else:
+                    target_existed = os.path.exists(target)
+                jobs.append((source_indices[id(info)], n, info, target, target_existed))
 
         # Names that differ only in case land on the same Windows file: keep the last.
         jobs = list({target.lower(): job for job in jobs for target in (job[3],)}.values())
-        parents = dict.fromkeys(os.path.dirname(target) for _, _, _, target in jobs)
+        parents = dict.fromkeys(os.path.dirname(target) for _, _, _, target, _ in jobs)
         accelerator = self._native_accelerator()
         if accelerator is not None and jobs:
             for parent in parents:
                 if cancel and cancel():
                     raise Cancelled()
                 os.makedirs(parent, exist_ok=True)
-            self._extract_native(accelerator, jobs, progress, cancel)
-            for directory in directories:
-                os.makedirs(directory, exist_ok=True)
-            return
+            if self._extract_native(accelerator, jobs, total, skipped, progress, cancel):
+                for directory in directories:
+                    os.makedirs(directory, exist_ok=True)
+                return
 
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
@@ -461,7 +526,7 @@ class Archive:
                 raise zipfile.BadZipFile(f"CRC mismatch: {info.filename}")
 
         def one(job):
-            _index, n, info, target = job
+            _index, n, info, target, _target_existed = job
             if stop.is_set():
                 return
             if cancel and cancel():

@@ -17,6 +17,10 @@ foreach ($header in $pins.header_sha256.PSObject.Properties) {
     $relative = $header.Name.Replace('/', [IO.Path]::DirectorySeparatorChar)
     Assert-Sha256 (Join-Path $tools "7zip-src\$relative") $header.Value
 }
+foreach ($sourcePin in $pins.crc_source_sha256.PSObject.Properties) {
+    $relative = $sourcePin.Name.Replace('/', [IO.Path]::DirectorySeparatorChar)
+    Assert-Sha256 (Join-Path $tools "7zip-src\$relative") $sourcePin.Value
+}
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe was not found" }
@@ -33,7 +37,9 @@ $builtDll = Join-Path $intermediate "yzip_accel.dll"
 $output = Join-Path $outputDirectoryFull "yzip_accel.dll"
 $source = Join-Path $PSScriptRoot "yzip_accel.cpp"
 $sdkRoot = Join-Path $tools "7zip-src"
-$command = "call `"$vcvars`" >nul && cd /d `"$intermediate`" && cl /nologo /LD /std:c++17 /EHsc /O2 /GL /W4 /WX /MT /utf-8 /I`"$sdkRoot`" `"$source`" /link /LTCG /MACHINE:X64 /OUT:`"$builtDll`""
+$crcSource = Join-Path $sdkRoot "C\7zCrc.c"
+$crcOptSource = Join-Path $sdkRoot "C\7zCrcOpt.c"
+$command = "call `"$vcvars`" >nul && cd /d `"$intermediate`" && cl /nologo /LD /std:c++17 /EHsc /O2 /GL /W4 /WX /MT /utf-8 /I`"$sdkRoot`" `"$source`" `"$crcSource`" `"$crcOptSource`" /link /LTCG /MACHINE:X64 /OUT:`"$builtDll`""
 & cmd.exe /d /s /c $command
 if ($LASTEXITCODE) { throw "MSVC x64 native accelerator build failed (exit $LASTEXITCODE)" }
 if (-not (Test-Path -LiteralPath $builtDll -PathType Leaf)) { throw "MSVC reported success but DLL is missing: $builtDll" }

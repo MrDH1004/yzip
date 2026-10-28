@@ -19,6 +19,8 @@ enum yz_accel_status : std::uint32_t {
     YZ_ACCEL_UNSUPPORTED = 2,
     YZ_ACCEL_ERROR = 3,
     YZ_ACCEL_CORRUPT = 4,
+    YZ_ACCEL_UNAVAILABLE = 5,
+    YZ_ACCEL_IO_ERROR = 6,
 };
 
 struct yz_zip_job {
@@ -31,6 +33,19 @@ struct yz_zip_job {
 struct yz_progress_counters {
     volatile std::uint64_t completed_bytes;
     std::uint64_t total_bytes;
+};
+
+struct yz_zip_metrics {
+    std::uint64_t callback_calls;
+    std::uint64_t lookup_calls;
+    std::uint64_t write_calls;
+    std::uint64_t write_bytes;
+    std::uint64_t callback_ticks;
+    std::uint64_t write_ticks;
+    std::uint64_t crc_ticks;
+    std::uint64_t qpc_frequency;
+    std::uint32_t close_hresult;
+    std::uint32_t free_library_error;
 };
 
 YZ_ACCEL_EXPORT std::uint32_t YZ_ACCEL_CALL yz_accel_abi_version() noexcept;
@@ -48,3 +63,5 @@ YZ_ACCEL_EXPORT std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
     std::uint64_t output_limit,
     yz_progress_counters* progress,
     volatile std::uint32_t* cancellation_flag) noexcept;
+YZ_ACCEL_EXPORT std::uint32_t YZ_ACCEL_CALL yz_accel_last_zip_metrics(
+    yz_zip_metrics* metrics) noexcept;
