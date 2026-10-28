@@ -2,16 +2,23 @@
 #   -Stage app        DLL과 exe까지 (CI는 이 결과를 SignPath로 서명한 뒤 installer 단계를 실행)
 #   -Stage installer  dist\yzip 으로 설치 파일만
 #   -Stage all        전부 (기본값)
-# 로컬 서명: setup_signing.ps1이 만든 자체 서명 인증서(CurrentUser\My)가 있으면 그것으로 서명하고, 없으면 서명 없이
-# 빌드합니다. 타임스탬프는 넣지 않습니다(외부 서버로 해시를 보내지 않음). 공인 서명은 GitHub Actions + SignPath.
-param([ValidateSet("all", "app", "installer")][string]$Stage = "all")
+# 기본 빌드는 인증서가 있어도 unsigned입니다. 로컬 테스트 서명은 -SignArtifacts를 명시한 경우에만 사용합니다.
+# 타임스탬프는 넣지 않습니다(외부 서버로 해시를 보내지 않음). 공인 서명은 GitHub Actions + SignPath.
+param(
+    [ValidateSet("all", "app", "installer")][string]$Stage = "all",
+    [switch]$SignArtifacts
+)
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-    Where-Object Subject -eq "CN=yzip (self-signed test)" | Select-Object -First 1
+$cert = $null
+if ($SignArtifacts) {
+    $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
+        Where-Object Subject -eq "CN=yzip (self-signed test)" | Select-Object -First 1
+    if (-not $cert) { throw "-SignArtifacts requested, but the yzip test signing certificate is missing" }
+}
 
 function Sign($file) {
-    if (-not $cert) { Write-Output "로컬 인증서 없음 - 서명 생략: $file"; return }
+    if (-not $SignArtifacts) { Write-Output "서명 opt-in 없음 - unsigned 빌드: $file"; return }
     $s = Set-AuthenticodeSignature -FilePath $file -Certificate $cert -HashAlgorithm SHA256
     if ($s.Status -ne "Valid") { throw "서명 실패: $file ($($s.StatusMessage))" }
     Write-Output "서명 완료: $file"

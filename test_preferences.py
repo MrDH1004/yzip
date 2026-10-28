@@ -40,6 +40,7 @@ class PreferencesTests(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.settings_path = Path(self.folder.name) / "settings.json"
         self.patch(mock.patch.dict(os.environ, {"YZIP_SETTINGS": str(self.settings_path)}))
+        appearance.apply_appearance(self.app)
         self.patch(mock.patch.object(assoc, "status", return_value={
             ext: (False, "다른 앱") for ext in assoc.TYPES}))
         self.registered = set()

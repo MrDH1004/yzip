@@ -36,6 +36,7 @@ class RenewalTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         appcore.save_settings({"theme": "light", "language": "ko", "font_size": 10})
+        appearance.apply_appearance(self.app)
         self.win = gui.Main()
         self.win.show()
         self.app.processEvents()
@@ -96,7 +97,7 @@ class RenewalTests(unittest.TestCase):
                  if label.objectName() == "homeActionHint"]
         for note in notes:
             self.assertGreaterEqual(note.width(), note.sizeHint().width())
-            self.assertEqual(note.height(), note.fontMetrics().height())
+            self.assertEqual(note.height(), note.sizeHint().height())
         self.win.resize(960, 680)
         QTest.qWait(100)
         self.assertLessEqual(self.win.drop_zone.height(), compact_height)

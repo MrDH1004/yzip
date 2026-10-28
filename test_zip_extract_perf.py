@@ -119,7 +119,16 @@ assert not any(name.startswith('Cryptodome') for name in sys.modules)
         outside.mkdir()
         protected = outside / "data.bin"
         protected.write_bytes(b"existing outside")
-        os.symlink(outside, self.dest / "escape", target_is_directory=True)
+        redirect = self.dest / "escape"
+        if os.name == "nt":
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(redirect), str(outside)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, created.returncode, created.stderr or created.stdout)
+        else:
+            os.symlink(outside, redirect, target_is_directory=True)
         with ziplib.Archive(str(self.archive)) as archive:
             archive.extract(str(self.dest))
         self.assertEqual(protected.read_bytes(), b"existing outside")

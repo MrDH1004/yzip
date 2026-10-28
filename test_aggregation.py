@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHILD = r"""
@@ -34,12 +35,16 @@ def run(n, stagger):
     return outs
 
 
-ok = True
-for n, stagger in ((3, 0.05), (5, 0.15), (1, 0)):
-    outs = run(n, stagger)
-    collectors = [o for o in outs if o is not None]
-    expected = sorted(f"C:\\files\\f{i}.txt" for i in range(n))
-    good = len(collectors) == 1 and sorted(collectors[0]) == expected
-    print(("PASS" if good else "FAIL"), f"{n} processes -> {len(collectors)} collector(s)", "" if good else outs)
-    ok &= good
-sys.exit(0 if ok else 1)
+class AggregationTests(unittest.TestCase):
+    def test_separate_processes_merge_into_one_job(self):
+        for n, stagger in ((3, 0.05), (5, 0.15), (1, 0)):
+            with self.subTest(processes=n, stagger=stagger):
+                outs = run(n, stagger)
+                collectors = [output for output in outs if output is not None]
+                expected = sorted(f"C:\\files\\f{i}.txt" for i in range(n))
+                self.assertEqual(1, len(collectors), outs)
+                self.assertEqual(expected, sorted(collectors[0]))
+
+
+if __name__ == "__main__":
+    unittest.main()

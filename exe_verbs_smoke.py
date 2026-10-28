@@ -2,7 +2,7 @@
 
 Headless: QT_QPA_PLATFORM=offscreen, YZIP_NO_OPEN (don't open Explorer), YZIP_AUTOACCEPT (accept the compress
 dialog and quit after it), LOCALAPPDATA redirected so error.log is isolated. Startup timing is real (no scaling).
-Usage: python test_exe_verbs.py [--keep-registered]
+Usage: python exe_verbs_smoke.py [--keep-registered]
 """
 import hashlib
 import os

@@ -41,27 +41,30 @@ jobs:
 
       - name: Bundled native archive backends
         shell: powershell
-        run: .\fetch_tools.ps1
+        run: |
+          .\fetch_tools.ps1
+          .\nativeaccel\build.ps1 -OutputDirectory tools
 
       - name: Native payload sanity check
         shell: powershell
         run: |
-          $required = "tools\libarchive.dll", "tools\yzip_native.dll", "tools\zpaq.exe"
+          $required = "tools\7z.dll", "tools\7zip-pins.json", "tools\libarchive.dll", "tools\yzip_accel.dll", "tools\yzip_native.dll", "tools\zpaq.exe"
           foreach ($path in $required) {
             if (-not (Test-Path $path)) { throw "missing native payload: $path" }
             $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
             Write-Output "$path $hash"
           }
           $env:YZIP_LIBARCHIVE_DLL = (Resolve-Path "tools\libarchive.dll").Path
+          $env:YZIP_ACCEL_DLL = (Resolve-Path "tools\yzip_accel.dll").Path
           $env:YZIP_NATIVE_DLL = (Resolve-Path "tools\yzip_native.dll").Path
-          python -c "import ctypes, os; ctypes.WinDLL(os.environ['YZIP_LIBARCHIVE_DLL']); ctypes.WinDLL(os.environ['YZIP_NATIVE_DLL'])"
+          python -c "import ctypes, os; ctypes.WinDLL(os.environ['YZIP_LIBARCHIVE_DLL']); ctypes.WinDLL(os.environ['YZIP_NATIVE_DLL']); from archive_accel import CAP_ZIP_EXTRACT, load_accelerator; a = load_accelerator(os.environ['YZIP_ACCEL_DLL']); assert a is not None and a.capabilities & CAP_ZIP_EXTRACT"
           if ((Get-Item "tools\zpaq.exe").Length -lt 100000) { throw "zpaq.exe is unexpectedly small" }
 
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
           YZIP_NO_UPDATE: "1"
-        run: python -W ignore -m unittest test_ziprepair test_ziplib test_zipwriter test_formats test_nativearchive test_moreformats test_updater
+        run: python -W ignore -m unittest test_ziprepair test_ziplib test_zipwriter test_formats test_nativearchive test_moreformats test_updater test_archive_accel test_zip_native test_zip_extract_perf
 
       - name: Preferences tests
         env:
@@ -77,9 +80,31 @@ jobs:
         shell: powershell
         run: .\build.ps1 -Stage app
 
+      - name: Packaged native accelerator and EXE smoke
+        shell: powershell
+        run: |
+          $accel = @(Get-ChildItem dist\yzip -Recurse -Filter yzip_accel.dll)
+          $pins = @(Get-ChildItem dist\yzip -Recurse -Filter 7zip-pins.json)
+          $runtime = @(Get-ChildItem dist\yzip -Recurse -Filter 7z.dll)
+          if ($accel.Count -ne 1 -or $pins.Count -ne 1 -or $runtime.Count -ne 1) {
+            throw "packaged native accelerator payload is incomplete"
+          }
+          python .\packaged_native_smoke.py
+          $marker = Join-Path $env:RUNNER_TEMP "yzip-version-smoke.txt"
+          $env:YZIP_UPDATE_TEST_MARKER = $marker
+          $env:YZIP_NO_UPDATE = "1"
+          $smoke = Start-Process .\dist\yzip\yzip.exe -ArgumentList "--updated" -Wait -PassThru -WindowStyle Hidden
+          if ($smoke.ExitCode) { throw "packaged yzip.exe smoke failed (exit $($smoke.ExitCode))" }
+          $expected = python -c "import version; print(version.__version__)"
+          if ((Get-Content -Raw $marker) -ne $expected) { throw "packaged yzip.exe version smoke mismatch" }
+
       - name: Native menu preferences tests
         shell: powershell
         run: .\test_shell_native.ps1
+
+      - name: Packaged Explorer verb smoke
+        shell: powershell
+        run: python .\exe_verbs_smoke.py
 
       - name: Upload unsigned app artifact
         id: upload-app
