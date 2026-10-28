@@ -196,6 +196,41 @@ class NativeFormatTests(Tmp):
         with self.assertRaises(ValueError):
             formats.detect(p)
 
+    def test_zpaq_roundtrip_through_yzip_backend(self):
+        tool = os.path.join(HERE, "tools", "zpaq.exe")
+        if not os.path.exists(tool):
+            self.skipTest("bundled zpaq.exe not present")
+        payload = os.path.join(self.t, "payload.txt")
+        with open(payload, "wb") as f:
+            f.write(b"zpaq payload\n")
+        archive = os.path.join(self.t, "sample.zpaq")
+        subprocess.run([tool, "add", archive, "payload.txt"], cwd=self.t, check=True,
+                       capture_output=True, text=True)
+        with formats.open_any(archive) as a:
+            self.assertEqual([e.name for e in a.entries()], ["payload.txt"])
+            self.assertEqual(a.test(), [])
+            out = os.path.join(self.t, "out")
+            a.extract(out)
+        with open(os.path.join(out, "payload.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"zpaq payload\n")
+
+    def test_7z_sfx_exe_is_openable_but_plain_exe_is_not(self):
+        tool = os.path.join(HERE, "tools", "7z.exe")
+        if not os.path.exists(tool):
+            self.skipTest("bundled 7z.exe not present")
+        payload = os.path.join(self.t, "payload.txt")
+        with open(payload, "wb") as f:
+            f.write(b"sfx payload")
+        base = os.path.join(self.t, "base.7z")
+        subprocess.run([tool, "a", base, "payload.txt"], cwd=self.t, check=True,
+                       capture_output=True)
+        exe = os.path.join(self.t, "archive.exe")
+        with open(base, "rb") as source, open(exe, "wb") as f:
+            f.write(b"MZ\0\0" + source.read())
+        self.assertEqual(formats.detect(exe), "7zcli")
+        with formats.open_any(exe) as a:
+            self.assertEqual([e.name for e in a.entries()], ["payload.txt"])
+
 
 # ---------- Python-decoded formats ----------
 

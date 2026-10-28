@@ -3,7 +3,8 @@
 가볍고 빠른 Windows 압축 프로그램 (Python · PySide6).
 
 - **형식**: ZIP(AES-256 암호, 분할, ZIP64), 7Z(AES-256, 이름 암호화), TAR / TAR.GZ / TAR.BZ2 / TAR.XZ / TAR.ZST,
-  GZ / BZ2 / XZ / ZST. 풀 때는 확장자가 아니라 파일 내용으로 형식을 알아봅니다.
+  GZ / BZ2 / XZ / ZST를 생성하고, ZIPX / EXE(SFX) / LZH / ISO / ZPAQ 및 RAR·CAB·EGG·ALZ를 포함한 압축 형식을 읽고 풉니다.
+  EXE는 자체 압축 실행 파일만 열며 일반 실행 파일은 보호합니다. 풀 때는 확장자가 아니라 파일 내용으로 형식을 알아봅니다.
 - **빠름**: 멀티스레드 ZIP·AES·7z/xz(LZMA2) 압축과 풀기.
 - **탐색기 우클릭**: `이름.zip으로 압축하기`(바로 압축), `yzip으로 압축하기…`(형식·암호 선택), 여기에/폴더에 풀기.
   Windows 11에서는 "더 많은 옵션 표시"(Shift+F10) 안에 있습니다.
@@ -61,4 +62,5 @@ RAR/RAR5, ISO/UDF, CAB, LHA, CPIO, RPM and DEB are read in-process through the b
 EGG and ALZ are read in-process through the bundled Rust module (`yzip_native.dll`, embedding `unegg` and `unalz`).
 RAR, EGG and ALZ remain extraction-only; archive creation is not advertised for those formats. Encrypted RAR is detected and rejected safely because the bundled reader does not implement RAR decryption.
 
-The remaining 7-Zip-only formats use the compatibility reader until a dedicated in-process backend is added.
+ZPAQ is read, tested and extracted through the bundled x64 `zpaq.exe` compatibility reader. ZIP/7Z self-extracting EXE files are accepted only when an archive signature is found inside the executable; ordinary EXE files are rejected.
+The remaining 7-Zip-only formats use the bundled 7-Zip compatibility reader until a dedicated in-process backend is added.

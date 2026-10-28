@@ -23,10 +23,11 @@ H = winreg.HKEY_CURRENT_USER
 TYPES = {".zip": "ZIP 압축 파일", ".7z": "7Z 압축 파일", ".tar": "TAR 묶음 파일", ".tgz": "TAR.GZ 압축 파일",
          ".gz": "GZ 압축 파일", ".tbz": "TAR.BZ2 압축 파일", ".tbz2": "TAR.BZ2 압축 파일", ".bz2": "BZ2 압축 파일",
          ".txz": "TAR.XZ 압축 파일", ".xz": "XZ 압축 파일", ".tzst": "TAR.ZST 압축 파일", ".zst": "ZST 압축 파일",
-         # read-only formats; disk images and installers (iso, msi, img, ...) keep Windows' own handler
+         # EXE is intentionally excluded: associating every executable would hijack ordinary programs.
          ".rar": "RAR 압축 파일", ".alz": "ALZ 압축 파일", ".egg": "EGG 압축 파일", ".arj": "ARJ 압축 파일",
          ".lzh": "LZH 압축 파일", ".lha": "LHA 압축 파일", ".zipx": "ZIPX 압축 파일", ".lzma": "LZMA 압축 파일",
-         ".z": "Z 압축 파일", ".lz": "LZIP 압축 파일", ".lz4": "LZ4 압축 파일", ".br": "Brotli 압축 파일"}
+         ".z": "Z 압축 파일", ".lz": "LZIP 압축 파일", ".lz4": "LZ4 압축 파일", ".br": "Brotli 압축 파일",
+         ".cab": "CAB 압축 파일", ".iso": "ISO 디스크 이미지", ".zpaq": "ZPAQ 압축 파일"}
 
 
 def exe_path() -> str:

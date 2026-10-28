@@ -92,6 +92,16 @@ class FormatTests(unittest.TestCase):
         self.assertIn(b"r.bin\x00", head)
         self.assertNotIn(b"partial", head)
 
+    def test_bandizip_reference_extensions_are_exposed(self):
+        expected = {".zip", ".zipx", ".exe", ".tar", ".tgz", ".lzh", ".iso", ".7z", ".gz", ".xz", ".zpaq"}
+        self.assertTrue(expected <= set(formats.READ_EXTS), sorted(set(formats.READ_EXTS) & expected))
+
+    def test_zpaq_magic_is_detected(self):
+        path = os.path.join(self.root, "sample.zpaq")
+        with open(path, "wb") as f:
+            f.write(b"zPQ" + b"\0" * 64)
+        self.assertEqual(formats.detect(path), "zpaq")
+
     def test_7z_password(self):
         out = self.roundtrip("7z", password="암호Pw1")
         with self.assertRaises(ziplib.BadPassword):  # names are encrypted too

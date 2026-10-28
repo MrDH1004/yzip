@@ -41,13 +41,14 @@ try {
             "--icon", "yzip.ico", "--version-file", "build\version_info.txt", "--add-data", "yzip.ico;.",
             "--add-binary", "shell\build\yzipshell.dll;.", "--add-binary", "tools\7z.exe;tools",
             "--add-binary", "tools\7z.dll;tools", "--add-binary", "tools\libarchive.dll;tools",
-            "--add-binary", "tools\yzip_native.dll;tools", "--add-data", "tools\licenses;tools\licenses",
+            "--add-binary", "tools\yzip_native.dll;tools", "--add-binary", "tools\zpaq.exe;tools",
+            "--add-data", "tools\licenses;tools\licenses",
             "--hidden-import", "cliarchive", "--hidden-import", "nativearchive", "--hidden-import", "nativearchive_ffi",
             "--hidden-import", "nativearchive_libarchive", "--hidden-import", "nativearchive_legacy", "--hidden-import", "minifmt",
             "--exclude-module", "PySide6.QtWebEngineCore",
             "--exclude-module", "PySide6.QtQml", "--exclude-module", "PySide6.Qt3DCore",
             "--exclude-module", "setuptools", "--exclude-module", "pkg_resources",
-            "--exclude-module", "_distutils_hack", "--hidden-import", "yzip_gui", "yzip_main.py")
+            "--exclude-module", "_distutils_hack", "--hidden-import", "zpaqarchive", "--hidden-import", "yzip_gui", "yzip_main.py")
         Sign "$root\dist\yzip\yzip.exe"
     }
     if ($Stage -in "all", "installer") {

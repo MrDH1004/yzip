@@ -680,12 +680,12 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #6e7781; font-size: 9pt;")
         lay.addWidget(hint)
-        list_title = QLabel(f"연결 가능한 파일 형식 ({len(assoc.TYPES)}개)")
+        list_title = QLabel(f"지원하는 파일 형식 ({len(formats.SUPPORTED_TYPES)}개)")
         list_title.setStyleSheet("font-weight: 600; color: #1f2328;")
         lay.addWidget(list_title)
         self.assoc_list = QTreeWidget()
         self.assoc_list.setAccessibleName("연결 가능한 파일 형식 목록")
-        self.assoc_list.setHeaderLabels(["확장자", "파일 형식"])
+        self.assoc_list.setHeaderLabels(["확장자", "파일 형식", "파일 연결"])
         self.assoc_list.setRootIsDecorated(False)
         self.assoc_list.setSelectionMode(QTreeWidget.NoSelection)
         self.assoc_list.setFocusPolicy(Qt.NoFocus)
@@ -693,11 +693,17 @@ class SettingsDialog(QDialog):
         self.assoc_list.setMinimumHeight(170)
         self.assoc_list.setMaximumHeight(240)
         self.assoc_list.setColumnWidth(0, 90)
+        self.assoc_list.setColumnWidth(2, 110)
         self.assoc_list.header().setStretchLastSection(True)
-        for ext, label in assoc.TYPES.items():
-            self.assoc_list.addTopLevelItem(QTreeWidgetItem([ext, label]))
+        for ext, label in formats.SUPPORTED_TYPES.items():
+            can_associate = ext in assoc.TYPES
+            state = "가능" if can_associate else "지원(연결 제외)"
+            item = QTreeWidgetItem([ext, label, state])
+            if not can_associate:
+                item.setForeground(2, Qt.darkGray)
+            self.assoc_list.addTopLevelItem(item)
         lay.addWidget(self.assoc_list)
-        note = QLabel("ISO·CAB 등 yzip이 열 수 있는 형식 중 일부는 Windows 기본 동작을 보존하기 위해 이 목록에서 제외되어 있습니다.")
+        note = QLabel("EXE는 자체 압축 실행 파일만 열 수 있습니다. 일반 .exe를 yzip으로 연결하면 Windows 프로그램 실행이 막히므로 파일 연결 대상에서는 제외했습니다.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #6e7781; font-size: 8.5pt;")
         lay.addWidget(note)

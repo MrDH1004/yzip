@@ -67,15 +67,26 @@ SEVENZ_IMAGE_EXTS = [".iso", ".img", ".udf", ".msi", ".wim", ".swm", ".esd", ".v
 LIBARCHIVE_ARCHIVE_EXTS = [".rar", ".cab", ".lzh", ".lha", ".cpio", ".rpm", ".deb"]
 LIBARCHIVE_IMAGE_EXTS = [".iso", ".img", ".udf"]
 NATIVE_EXT_TO_KIND = {e[1:]: e[1:] for e in LIBARCHIVE_ARCHIVE_EXTS + LIBARCHIVE_IMAGE_EXTS}
+SFX_EXTS = [".exe"]  # only self-extracting archives; ordinary executables are never treated as archives
+ZPAQ_EXTS = [".zpaq"]
 # decoded in Python (minifmt)
 MINI_EXTS = {".br": "br", ".lz": "lz", ".lz4": "lz4", ".aes": "aes", ".uu": "uu", ".uue": "uu", ".xxe": "uu",
              ".asar": "asar"}
 # what "압축 풀기" handles in Explorer and in the open dialog (one registry key per final extension)
-READ_EXTS = [".zip", ".7z", ".tar", ".tgz", ".gz", ".tbz", ".tbz2", ".bz2", ".txz", ".xz", ".tzst", ".zst", ".egg",
-             ".alz"] + SEVENZ_ARCHIVE_EXTS + list(MINI_EXTS) + SEVENZ_IMAGE_EXTS
+_PRIMARY_READ_EXTS = [".zip", ".zipx", ".exe", ".tar", ".tgz", ".lzh", ".iso", ".7z", ".gz", ".xz", ".zpaq"]
+_OTHER_READ_EXTS = [".tbz", ".tbz2", ".bz2", ".txz", ".tzst", ".zst", ".egg", ".alz"] + \
+                   SEVENZ_ARCHIVE_EXTS + list(MINI_EXTS) + SEVENZ_IMAGE_EXTS
+READ_EXTS = _PRIMARY_READ_EXTS + [ext for ext in _OTHER_READ_EXTS if ext not in _PRIMARY_READ_EXTS]
 # images and installers: right-clicking them still offers compressing (they are not "just an archive")
 IMAGE_EXTS = list(SEVENZ_IMAGE_EXTS)
 OPEN_FILTER = "압축 파일 (" + " ".join("*" + e for e in READ_EXTS + [".001", ".r00", ".a00"]) + ");;모든 파일 (*.*)"
+_TYPE_LABELS = {
+    ".zip": "ZIP 압축 파일", ".zipx": "ZIPX 압축 파일", ".exe": "EXE 자체 압축 실행 파일",
+    ".tar": "TAR 묶음 파일", ".tgz": "TGZ 압축 파일", ".lzh": "LZH 압축 파일",
+    ".iso": "ISO 디스크 이미지", ".7z": "7Z 압축 파일", ".gz": "GZ 압축 파일",
+    ".xz": "XZ 압축 파일", ".zpaq": "ZPAQ 압축 파일", ".cab": "CAB 압축 파일",
+}
+SUPPORTED_TYPES = {ext: _TYPE_LABELS.get(ext, ext.upper().lstrip(".") + " 파일") for ext in READ_EXTS}
 _MULTI_EXTS = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
 _TAR_NAMES = _MULTI_EXTS + (".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst")
 # volumes of one set: x.part2.rar / x.r00 (RAR), x.vol2.egg (EGG), x.a00 (ALZ), x.z01 (ZIP, Bandizip / WinZip)
@@ -126,6 +137,23 @@ def with_format(path: str, fmt_id: str) -> str:
 
 # ---------- detection ----------
 
+def _contains_signature(path: str, signature: bytes, limit: int = 64 << 20) -> bool:
+    """Find a known archive header in a bounded SFX stub without loading the whole executable."""
+    overlap = max(0, len(signature) - 1)
+    carry = b""
+    remaining = limit
+    with open(path, "rb") as f:
+        while remaining:
+            chunk = f.read(min(1 << 20, remaining))
+            if not chunk:
+                return False
+            block = carry + chunk
+            if signature in block:
+                return True
+            carry = block[-overlap:] if overlap else b""
+            remaining -= len(chunk)
+    return False
+
 def detect(path: str) -> str:
     """Return the format id used by the appropriate in-process backend."""
     with open(path, "rb") as f:
@@ -141,6 +169,8 @@ def detect(path: str) -> str:
         return "rar"
     if head[:4] == b"MSCF":
         return "cab"
+    if head[:3] == b"zPQ" or low.endswith(tuple(ZPAQ_EXTS)):
+        return "zpaq"
     if low.endswith(".zipx") or low.endswith(".zip") and os.path.exists(path[:-4] + ".z01"):
         return "7zcli"  # newer ZIP methods / a Bandizip-WinZip split set (.z01 .z02 ... .zip)
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
@@ -175,6 +205,8 @@ def detect(path: str) -> str:
             return kind
     if zipfile.is_zipfile(path):  # e.g. a ZIP behind a self-extractor stub
         return "zip"
+    if low.endswith(tuple(SFX_EXTS)) and _contains_signature(path, b"7z\xbc\xaf\x27\x1c"):
+        return "7zcli"
     raise ValueError("지원하지 않는 압축 형식입니다.")
 
 
@@ -187,6 +219,9 @@ def open_any(path: str, password: Optional[str] = None):
     if kind == "7zcli":
         from cliarchive import CliArchive
         return CliArchive(path, kind, password)
+    if kind == "zpaq":
+        from zpaqarchive import ZpaqArchive
+        return ZpaqArchive(path, password)
     if kind in ("uu", "asar"):
         import minifmt
         return minifmt.UUArchive(path) if kind == "uu" else minifmt.AsarArchive(path)

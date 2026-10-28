@@ -7,7 +7,7 @@ param([switch]$Force)
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $tools = Join-Path $root "tools"
-$need = "7z.exe", "7z.dll", "libarchive.dll", "yzip_native.dll"
+$need = "7z.exe", "7z.dll", "libarchive.dll", "yzip_native.dll", "zpaq.exe"
 if (-not $Force -and -not ($need | Where-Object { -not (Test-Path (Join-Path $tools $_)) })) {
     Write-Output "tools: present"
     return
@@ -19,6 +19,7 @@ $LIBARCHIVE_URL = "https://github.com/li-ruijie/libarchive/releases/download/v3.
 $LIBARCHIVE_SHA256 = "fc6e8d9cb6160c1faab208816f9fcdfc595a6c1232603a8458dc636c2f083028"
 $UNEGG_COMMIT = "9929009ca4d010e8cd88bb796f7a1868162026d4"
 $UNALZ_COMMIT = "30b4ad40c5452c686df69b3b45554de3073e57a1"
+$ZPAQ_COMMIT = "9ab539f644e364f0d92e2918b90ce2534c75653f"
 
 # git / cargo log to stderr; in Windows PowerShell 5.1 that counts as an error record, so judge by exit code
 function Run($exe, [string[]]$argv) {
@@ -60,6 +61,25 @@ try {
     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/li-ruijie/libarchive/master/LICENSE" `
         -OutFile (Join-Path $tools "licenses\libarchive-prebuilt LICENSE.txt") -UseBasicParsing
     Write-Output "tools: libarchive 3.8.10 ($LIBARCHIVE_SHA256)"
+
+    # ---- ZPAQ compatibility reader ----
+    $zpaqsrc = Join-Path $work "zpaq"
+    Run "git" @("clone", "--filter=blob:none", "--no-checkout", "--quiet", "https://github.com/zpaq/zpaq.git", $zpaqsrc)
+    Run "git" @("-C", $zpaqsrc, "fetch", "--depth", "1", "origin", $ZPAQ_COMMIT)
+    Run "git" @("-C", $zpaqsrc, "checkout", "--quiet", $ZPAQ_COMMIT)
+    $got = (& git -C $zpaqsrc rev-parse HEAD).Trim()
+    if ($got -ne $ZPAQ_COMMIT) { throw "ZPAQ source revision mismatch: $got" }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsdir = if (Test-Path $vswhere) {
+        (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+    }
+    if (-not $vsdir) { throw "Visual C++ x64 tools are needed to build zpaq.exe" }
+    $vsdev = Join-Path $vsdir "VC\Auxiliary\Build\vcvars64.bat"
+    $zpaqcmd = "call `"$vsdev`" >nul && cd /d `"$zpaqsrc`" && cl /nologo /O2 /EHsc /MT /utf-8 zpaq.cpp libzpaq.cpp advapi32.lib /Fe:`"$tools\zpaq.exe`""
+    Run "cmd.exe" @("/d", "/s", "/c", $zpaqcmd)
+    Copy-Item (Join-Path $zpaqsrc "COPYING") (Join-Path $tools "licenses\ZPAQ COPYING.txt") -Force
+    Copy-Item (Join-Path $zpaqsrc "zpaq.pod") (Join-Path $tools "licenses\ZPAQ manual.pod") -Force
+    Write-Output "tools: ZPAQ 7.15 ($ZPAQ_COMMIT)"
 
     # ---- EGG / ALZ native module ----
     $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source

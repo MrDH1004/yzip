@@ -46,7 +46,7 @@ jobs:
       - name: Native payload sanity check
         shell: powershell
         run: |
-          $required = "tools\libarchive.dll", "tools\yzip_native.dll"
+          $required = "tools\libarchive.dll", "tools\yzip_native.dll", "tools\zpaq.exe"
           foreach ($path in $required) {
             if (-not (Test-Path $path)) { throw "missing native payload: $path" }
             $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
@@ -55,6 +55,7 @@ jobs:
           $env:YZIP_LIBARCHIVE_DLL = (Resolve-Path "tools\libarchive.dll").Path
           $env:YZIP_NATIVE_DLL = (Resolve-Path "tools\yzip_native.dll").Path
           python -c "import ctypes, os; ctypes.WinDLL(os.environ['YZIP_LIBARCHIVE_DLL']); ctypes.WinDLL(os.environ['YZIP_NATIVE_DLL'])"
+          if ((Get-Item "tools\zpaq.exe").Length -lt 100000) { throw "zpaq.exe is unexpectedly small" }
 
       - name: Tests
         env:

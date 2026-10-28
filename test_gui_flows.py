@@ -576,9 +576,12 @@ def test_settings():
         check("settings: automatic update preference is saved",
               not gui.load_settings().get("auto_update", True), gui.load_settings())
         listed = {dlg.assoc_list.topLevelItem(i).text(0) for i in range(dlg.assoc_list.topLevelItemCount())}
-        check("settings: lists every extension controlled by file association",
-              listed == set(assoc.TYPES) and dlg.assoc_list.topLevelItemCount() == len(assoc.TYPES),
-              (len(listed), len(assoc.TYPES), sorted(set(assoc.TYPES) - listed)))
+        check("settings: lists every supported archive extension",
+              listed == set(gui.formats.SUPPORTED_TYPES) and dlg.assoc_list.topLevelItemCount() == len(gui.formats.SUPPORTED_TYPES),
+              (len(listed), len(gui.formats.SUPPORTED_TYPES), sorted(set(gui.formats.SUPPORTED_TYPES) - listed)))
+        check("settings: all requested archive types are connectable except ordinary EXE",
+              {".zipx", ".lzh", ".iso", ".cab", ".zpaq"} <= set(assoc.TYPES) and ".exe" not in assoc.TYPES,
+              sorted(assoc.TYPES))
         dlg.deleteLater()
     app.processEvents()
 
