@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 import zlib
@@ -91,6 +92,15 @@ class BenchmarkNativeTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "SHA-256 tree mismatch"):
                     benchmark.run_case(case, runs=1)
 
+    def test_run_case_verifies_warmup_hash_before_discarding_timing(self):
+        case = self._case(operation="extract")
+        corrupt_warmup = benchmark.ProcessSample(99.0, 99.0, 99, 0, tree_sha256="corrupt")
+        measured = benchmark.ProcessSample(1.0, 1.0, 1, 0, tree_sha256="source-hash")
+        with mock.patch.object(benchmark, "_run_iteration", side_effect=[corrupt_warmup, measured]):
+            with mock.patch.object(benchmark, "tree_sha256", return_value="source-hash"):
+                with self.assertRaisesRegex(RuntimeError, "warm-up SHA-256 tree mismatch"):
+                    benchmark.run_case(case, runs=1)
+
     def test_compression_cross_extracts_with_opposite_tool_and_rejects_corrupt_result(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -149,6 +159,60 @@ class BenchmarkNativeTests(unittest.TestCase):
     def test_7z_eight_thread_regression_gate_rejects_over_five_percent(self):
         with self.assertRaisesRegex(RuntimeError, "large-text.*5.00%"):
             benchmark.enforce_7z_regression_gate({"large-text": 10.5001}, {"large-text": 10.0})
+
+    def _gate_result(self, median):
+        return benchmark.BenchmarkResult(
+            case=self._case(dataset="large-text", tool="yzip", format="7z", operation="compress", threads=8),
+            measured_runs=7, wall_median_seconds=median, wall_p95_seconds=median,
+            cpu_median_seconds=median, peak_rss_bytes=1, archive_size_bytes=1,
+            requested_threads=8, command=("tool",), sha256_tree="hash",
+        )
+
+    def test_cli_omission_uses_default_committed_regression_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = root / "baseline.json"
+            output = root / "result.json"
+            baseline.write_text(json.dumps({"seven_zip_8_thread_medians_seconds": {"large-text": 10.0}}),
+                                encoding="utf-8")
+            with mock.patch.object(benchmark, "DEFAULT_BASELINE", baseline):
+                with mock.patch.object(benchmark, "_execute_matrix", return_value=([self._gate_result(10.0)], 1.0)):
+                    self.assertEqual(benchmark.cli(["--output", str(output)]), 0)
+
+    def test_cli_over_five_percent_regression_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = root / "baseline.json"
+            baseline.write_text(json.dumps({"seven_zip_8_thread_medians_seconds": {"large-text": 10.0}}),
+                                encoding="utf-8")
+            with mock.patch.object(benchmark, "DEFAULT_BASELINE", baseline):
+                with mock.patch.object(benchmark, "_execute_matrix", return_value=([self._gate_result(10.5001)], 1.0)):
+                    self.assertNotEqual(benchmark.cli(["--output", str(root / "result.json")]), 0)
+
+    def test_cli_refuses_summary_that_would_overwrite_regression_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = root / "baseline.json"
+            baseline.write_text("{}", encoding="utf-8")
+            with mock.patch.object(benchmark, "_execute_matrix") as execute:
+                code = benchmark.cli([
+                    "--output", str(root / "result.json"),
+                    "--regression-baseline", str(baseline),
+                    "--summary", str(baseline),
+                ])
+            self.assertNotEqual(code, 0)
+            execute.assert_not_called()
+
+    def test_cli_baseline_creation_mode_is_explicit_and_allows_new_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            summary = root / "new-baseline.json"
+            with mock.patch.object(benchmark, "_execute_matrix", return_value=([self._gate_result(10.0)], 1.0)):
+                code = benchmark.cli([
+                    "--create-baseline", "--output", str(root / "raw.json"), "--summary", str(summary),
+                ])
+            self.assertEqual(code, 0)
+            self.assertTrue(summary.is_file())
 
 
 if __name__ == "__main__":

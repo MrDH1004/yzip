@@ -8,9 +8,21 @@ From the repository root:
 
 ```powershell
 python benchmark_native.py --runs 7 `
+  --output .omc\artifacts\native-performance-baseline\latest.json `
+  --summary .omc\artifacts\native-performance-baseline\latest-summary.json
+```
+
+Normal runs automatically use the committed `docs\performance\native-benchmark-baseline.json` regression baseline. `--regression-baseline` is only needed to select another existing baseline. A summary path that resolves to the selected baseline is rejected before the matrix starts.
+
+Creating or intentionally replacing a baseline is a separate explicit mode:
+
+```powershell
+python benchmark_native.py --create-baseline --runs 7 `
   --output .omc\artifacts\native-performance-baseline\baseline-five-datasets.json `
   --summary docs\performance\native-benchmark-baseline.json
 ```
+
+`--create-baseline` requires `--summary` and cannot be combined with `--regression-baseline`, so it cannot silently act as a normal regression run.
 
 The harness requires `C:\Program Files\Bandizip\bz.exe`. It generates these deterministic datasets in a temporary directory:
 
@@ -20,7 +32,7 @@ The harness requires `C:\Program Files\Bandizip\bz.exe`. It generates these dete
 - a real copy of the yzip project with generated, tool, state, and VCS directories excluded;
 - one 32 MiB file.
 
-Every case gets one unreported warm-up followed by the requested number of measured runs. Every iteration uses a separate temporary output root; the harness neither clears operating-system caches nor changes installed applications.
+Every case gets one unreported warm-up followed by the requested number of measured runs. The warm-up result receives the same SHA-256 integrity verification but its timing is discarded. Every iteration uses a separate temporary output root; the harness neither clears operating-system caches nor changes installed applications.
 
 Bandizip receives `-t:N`. The yzip subprocess calls `runtimeconfig.configure(N, temporary_root)` before invoking `yzip_cli.main`, so the requested worker limit applies inside the measured process.
 
@@ -35,7 +47,7 @@ The JSON document contains `schema_version`, `runs`, `warmup_runs`, and a `resul
 
 The tree digest includes each relative path, file size, and file content in sorted path order. Extraction cases always consume an archive made by the opposite tool. Every measured compression result is also extracted by the opposite tool: yzip output by Bandizip, and Bandizip output by yzip. Any command failure or source/extracted-tree digest mismatch aborts the run.
 
-The yzip 7z compression median at 8 threads is the protected regression condition. `--regression-baseline docs/performance/native-benchmark-baseline.json` compares each matching dataset median with the committed baseline and fails when any regression exceeds 5%.
+The yzip 7z compression median at 8 threads is the protected regression condition. Ordinary execution compares each matching dataset median with the committed baseline and exits nonzero when any regression exceeds 5%.
 
 ## 2026-10-28 baseline ledger
 

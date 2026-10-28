@@ -28,6 +28,7 @@ LARGE_TEXT_BYTES = 8 * MB
 INCOMPRESSIBLE_BYTES = 8 * MB
 LARGE_FILE_BYTES = 32 * MB
 DATASET_NAMES = ("large-text", "incompressible", "small-files", "mixed-project", "large-file")
+DEFAULT_BASELINE = ROOT / "docs" / "performance" / "native-benchmark-baseline.json"
 
 
 @dataclass(frozen=True)
@@ -233,7 +234,9 @@ def run_case(case: BenchmarkCase, runs: int = 7) -> BenchmarkResult:
     if runs < 1:
         raise ValueError("runs must be at least 1")
     expected_hash = tree_sha256(case.source)
-    _run_iteration(case)  # warm-up is intentionally discarded
+    warmup = _run_iteration(case)
+    if warmup.tree_sha256 != expected_hash:
+        raise RuntimeError("warm-up SHA-256 tree mismatch")
     samples = [_run_iteration(case) for _ in range(runs)]
     for sample in samples:
         if sample.tree_sha256 != expected_hash:
@@ -339,62 +342,95 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--summary", type=Path)
-    parser.add_argument("--regression-baseline", type=Path)
-    parser.add_argument("--runs", type=int, default=7)
-    args = parser.parse_args(argv)
-    if not BZ_EXE.is_file():
-        parser.error(f"Bandizip console tool not found: {BZ_EXE}")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+def _execute_matrix(runs: int) -> tuple[list[BenchmarkResult], float]:
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="yzip-native-dataset-") as temp:
         workspace = Path(temp)
         datasets = make_datasets(workspace / "datasets")
         archive_root = workspace / "archives"
         _prepare_archives(datasets, archive_root)
-        results: list[BenchmarkResult] = []
+        results = []
         for case in expand_cases(datasets, archive_root):
             print(f"{case.dataset} {case.tool} {case.format} {case.operation} t={case.threads}", flush=True)
-            results.append(run_case(case, args.runs))
-        current_medians = _seven_zip_medians(results)
+            results.append(run_case(case, runs))
+    return results, time.perf_counter() - started
+
+
+def _write_summary(path: Path, raw_path: Path, results: Sequence[BenchmarkResult], runs: int,
+                   elapsed: float, regressions: dict[str, float]) -> None:
+    current_medians = _seven_zip_medians(results)
+    dataset_hashes = {
+        result.case.dataset: result.sha256_tree
+        for result in results
+        if result.case.tool == "yzip" and result.case.format == "7z"
+        and result.case.operation == "compress" and result.case.threads == 8
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "schema_version": 1,
+        "raw_json_path": str(raw_path),
+        "raw_json_sha256": _sha256_file(raw_path),
+        "dataset_count": len(DATASET_NAMES),
+        "case_count": len(results),
+        "measured_runs_per_case": runs,
+        "warmup_runs_per_case": 1,
+        "elapsed_seconds": elapsed,
+        "dataset_sha256_trees": dataset_hashes,
+        "seven_zip_8_thread_medians_seconds": current_medians,
+        "regression_fraction": regressions,
+    }
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--summary", type=Path)
+    parser.add_argument("--regression-baseline", type=Path)
+    parser.add_argument("--create-baseline", action="store_true")
+    parser.add_argument("--runs", type=int, default=7)
+    args = parser.parse_args(argv)
+    if not BZ_EXE.is_file():
+        parser.error(f"Bandizip console tool not found: {BZ_EXE}")
+    if args.create_baseline:
         if args.regression_baseline:
-            baseline_doc = json.loads(args.regression_baseline.read_text(encoding="utf-8"))
-            baseline_medians = baseline_doc["seven_zip_8_thread_medians_seconds"]
-        else:
-            baseline_medians = current_medians
+            parser.error("--create-baseline cannot be combined with --regression-baseline")
+        if not args.summary:
+            parser.error("--create-baseline requires --summary for the new baseline manifest")
+        baseline_path = None
+    else:
+        baseline_path = args.regression_baseline or DEFAULT_BASELINE
+        if not baseline_path.is_file():
+            parser.error(f"regression baseline not found: {baseline_path}")
+        if args.summary and args.summary.resolve() == baseline_path.resolve():
+            parser.error("--summary must not overwrite the regression baseline")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    results, elapsed = _execute_matrix(args.runs)
+    current_medians = _seven_zip_medians(results)
+    if baseline_path:
+        baseline_doc = json.loads(baseline_path.read_text(encoding="utf-8"))
+        baseline_medians = baseline_doc["seven_zip_8_thread_medians_seconds"]
         regressions = enforce_7z_regression_gate(current_medians, baseline_medians)
-        elapsed = time.perf_counter() - started
-        report = {"schema_version": 2, "runs": args.runs, "warmup_runs": 1,
-                  "dataset_count": len(datasets), "regression_fraction": regressions,
-                  "results": [result.to_json() for result in results]}
-        args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    else:
+        regressions = {name: 0.0 for name in current_medians}
+    report = {"schema_version": 2, "runs": args.runs, "warmup_runs": 1,
+              "dataset_count": len(DATASET_NAMES), "regression_fraction": regressions,
+              "results": [result.to_json() for result in results]}
+    args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if args.summary:
-        args.summary.parent.mkdir(parents=True, exist_ok=True)
-        dataset_hashes = {
-            result.case.dataset: result.sha256_tree
-            for result in results
-            if result.case.tool == "yzip" and result.case.format == "7z"
-            and result.case.operation == "compress" and result.case.threads == 8
-        }
-        summary = {
-            "schema_version": 1,
-            "raw_json_path": str(args.output),
-            "raw_json_sha256": _sha256_file(args.output),
-            "dataset_count": len(DATASET_NAMES),
-            "case_count": len(results),
-            "measured_runs_per_case": args.runs,
-            "warmup_runs_per_case": 1,
-            "elapsed_seconds": elapsed,
-            "dataset_sha256_trees": dataset_hashes,
-            "seven_zip_8_thread_medians_seconds": current_medians,
-            "regression_fraction": regressions,
-        }
-        args.summary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        _write_summary(args.summary, args.output, results, args.runs, elapsed, regressions)
     return 0
 
 
+def cli(argv: Sequence[str] | None = None) -> int:
+    try:
+        return main(argv)
+    except SystemExit as error:
+        return int(error.code or 0)
+    except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
