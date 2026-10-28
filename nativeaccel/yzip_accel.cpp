@@ -68,6 +68,25 @@ bool is_cancelled(const volatile std::uint32_t* flag) {
     return InterlockedCompareExchange(value, 0L, 0L) != 0;
 }
 
+enum class TestWriteFault {
+    none,
+    failure,
+    short_write,
+};
+
+TestWriteFault configured_test_write_fault() noexcept {
+    wchar_t value[16]{};
+    const DWORD length = GetEnvironmentVariableW(
+        L"YZIP_NATIVE_TEST_WRITE_FAULT", value, static_cast<DWORD>(std::size(value)));
+    if (length == 7 && wcscmp(value, L"failure") == 0) {
+        return TestWriteFault::failure;
+    }
+    if (length == 5 && wcscmp(value, L"short") == 0) {
+        return TestWriteFault::short_write;
+    }
+    return TestWriteFault::none;
+}
+
 void initialize_crc() {
     static std::once_flag initialized;
     std::call_once(initialized, CrcGenerateTable);
@@ -178,7 +197,8 @@ public:
           io_failed_(io_failed),
           metrics_(metrics),
           size_(0),
-          crc_(CRC_INIT_VAL) {
+          crc_(CRC_INIT_VAL),
+          test_write_fault_(configured_test_write_fault()) {
         initialize_crc();
     }
 
@@ -250,7 +270,14 @@ public:
         ++metrics_->write_calls;
         metrics_->write_bytes += size;
         const std::uint64_t write_started = performance_counter();
-        const BOOL write_succeeded = WriteFile(handle_, data, size, &written, nullptr);
+        DWORD write_size = size;
+        if (test_write_fault_ == TestWriteFault::failure) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        } else if (test_write_fault_ == TestWriteFault::short_write && write_size > 0) {
+            --write_size;
+        }
+        const BOOL write_succeeded = WriteFile(handle_, data, write_size, &written, nullptr);
         const std::uint64_t write_finished = performance_counter();
         if (write_finished >= write_started) {
             metrics_->write_ticks += write_finished - write_started;
@@ -290,6 +317,7 @@ private:
     yz_zip_metrics* metrics_;
     std::uint64_t size_;
     std::uint32_t crc_;
+    TestWriteFault test_write_fault_;
 };
 
 class ExtractCallback final : public IArchiveExtractCallback {
@@ -412,7 +440,9 @@ public:
         if (result != NArchive::NExtract::NOperationResult::kOK ||
             current_ == nullptr || !current_->verified()) {
             operation_failed_ = true;
-            corrupt_ = true;
+            if (!io_failed_) {
+                corrupt_ = true;
+            }
         }
         release_current();
         return operation_failed_ ? E_FAIL : S_OK;
@@ -560,13 +590,12 @@ std::uint32_t YZ_ACCEL_CALL yz_accel_extract_zip(
                                 callback);
                             if (is_cancelled(cancellation_flag)) {
                                 status = YZ_ACCEL_CANCELLED;
-                            } else if (callback->corrupt() ||
-                                       (result != S_OK && !callback->io_failed())) {
-                                set_error(L"7z.dll reported corrupt ZIP data");
-                                status = YZ_ACCEL_CORRUPT;
                             } else if (callback->io_failed()) {
                                 set_error(L"native ZIP staging I/O failed");
                                 status = YZ_ACCEL_IO_ERROR;
+                            } else if (callback->corrupt() || result != S_OK) {
+                                set_error(L"7z.dll reported corrupt ZIP data");
+                                status = YZ_ACCEL_CORRUPT;
                             } else if (result != S_OK || callback->operation_failed()) {
                                 set_error(L"7z.dll reported a ZIP extraction error");
                             } else {

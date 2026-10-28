@@ -189,6 +189,17 @@ class NativeZipTransactionTests(unittest.TestCase):
         self.assertEqual([], accelerator.calls)
         self.assertEqual(b"alpha", Path(destination, "a.txt").read_bytes())
 
+    def test_many_small_plain_members_use_faster_python_engine_when_native_is_enabled(self):
+        members = [(f"f{index:03d}.txt", f"payload-{index}".encode()) for index in range(256)]
+        path = self.make_zip(members)
+        accelerator = RecordingAccelerator()
+
+        destination = self.extract_with(path, accelerator)
+
+        self.assertEqual([], accelerator.calls)
+        for name, payload in members:
+            self.assertEqual(payload, Path(destination, name).read_bytes())
+
     def test_store_and_deflate_mixed_archive_falls_back_for_whole_operation(self):
         path = os.path.join(self.root, "mixed.zip")
         with zipfile.ZipFile(path, "w") as archive:
@@ -373,6 +384,50 @@ class NativeZipTransactionTests(unittest.TestCase):
         self.assertEqual(b"old b", (destination / "b.bin").read_bytes())
         self.assert_no_staging_files(str(destination))
 
+    def test_rollback_continues_after_remove_and_restore_failures_and_reports_backups(self):
+        path = self.make_zip([("a.bin", b"new a"), ("b.bin", b"new b"), ("new.bin", b"new")])
+        destination = Path(self.root, "out")
+        destination.mkdir()
+        (destination / "a.bin").write_bytes(b"old a")
+        (destination / "b.bin").write_bytes(b"old b")
+        real_finish = ziplib.finish_part
+        real_remove = os.remove
+        real_replace = os.replace
+        publishes = {"count": 0}
+        failed_backup = []
+
+        def fail_third_publish(part, target):
+            publishes["count"] += 1
+            if publishes["count"] == 3:
+                raise OSError("injected publish failure")
+            real_finish(part, target)
+
+        def fail_first_remove(candidate):
+            if os.fspath(candidate).endswith(os.sep + "a.bin"):
+                raise PermissionError("published target locked")
+            real_remove(candidate)
+
+        def fail_first_restore(source, target):
+            if (os.fspath(source).endswith(".native-backup") and
+                    os.fspath(target).endswith(os.sep + "a.bin")):
+                failed_backup.append(os.fspath(source))
+                raise PermissionError("backup restore locked")
+            real_replace(source, target)
+
+        with mock.patch.object(ziplib, "finish_part", side_effect=fail_third_publish), \
+                mock.patch.object(ziplib.os, "remove", side_effect=fail_first_remove), \
+                mock.patch.object(ziplib.os, "replace", side_effect=fail_first_restore):
+            with self.assertRaises(ziplib.NativeRollbackError) as raised:
+                self.extract_with(path, RecordingAccelerator())
+
+        error = raised.exception
+        self.assertIn("injected publish failure", str(error))
+        self.assertEqual(2, len(error.failures))
+        self.assertEqual(b"old b", (destination / "b.bin").read_bytes())
+        self.assertEqual(b"new a", (destination / "a.bin").read_bytes())
+        self.assertEqual(failed_backup, error.recoverable_backups)
+        self.assertEqual(b"old a", Path(error.recoverable_backups[0]).read_bytes())
+
     def test_backup_delete_failure_is_nonfatal_and_warns_with_recoverable_backup(self):
         path = self.make_zip([("a.bin", b"new a")])
         destination = Path(self.root, "out")
@@ -534,6 +589,30 @@ class BuiltNativeZipTests(unittest.TestCase):
             result = accelerator.extract_zip(str(source), [job], None, None)
 
             self.assertEqual(archive_accel.AccelStatus.IO_ERROR, result.status)
+
+    def test_built_bridge_write_failure_and_successful_short_write_are_io_errors(self):
+        accelerator = self.load_built()
+        for fault in ("failure", "short"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as root:
+                source = Path(root, "source.zip")
+                payload = b"write fault payload" * 100
+                with zipfile.ZipFile(source, "w") as archive:
+                    archive.writestr("data.bin", payload)
+                staging = Path(root, "data.part")
+                job = archive_accel.NativeZipJob(
+                    0, str(staging), len(payload), zlib.crc32(payload)
+                )
+
+                with mock.patch.dict(
+                    os.environ, {"YZIP_NATIVE_TEST_WRITE_FAULT": fault}, clear=False
+                ):
+                    result = accelerator.extract_zip(str(source), [job], None, None)
+
+                self.assertEqual(archive_accel.AccelStatus.IO_ERROR, result.status)
+                self.assertIn("I/O", accelerator.last_error())
+
+                recovered = accelerator.extract_zip(str(source), [job], None, None)
+                self.assertEqual(archive_accel.AccelStatus.OK, recovered.status)
 
     def test_built_bridge_extracts_nonsequential_partial_indices(self):
         accelerator = self.load_built()

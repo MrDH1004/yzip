@@ -41,6 +41,19 @@ class NativeExtractionError(Exception):
     pass
 
 
+class NativeRollbackError(NativeExtractionError):
+    def __init__(self, cause: BaseException, failures: list[str], recoverable_backups: list[str]):
+        self.cause = cause
+        self.failures = failures
+        self.recoverable_backups = recoverable_backups
+        detail = "; ".join(failures)
+        backups = ", ".join(recoverable_backups) or "none"
+        super().__init__(
+            f"{cause}; native ZIP rollback incomplete: {detail}; "
+            f"recoverable backups: {backups}"
+        )
+
+
 @dataclass
 class Entry:
     name: str
@@ -285,10 +298,13 @@ class Archive:
         infos = self.zf.infolist()
         if not infos or any(info.flag_bits & 1 for info in infos):
             return None
-        methods = {info.compress_type for info in infos if not info.is_dir()}
+        files = [info for info in infos if not info.is_dir()]
+        methods = {info.compress_type for info in files}
         if not methods or not methods.issubset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}):
             return None
         if len(methods) != 1:
+            return None
+        if len(files) >= 256 and sum(info.file_size for info in files) <= len(files) * (64 << 10):
             return None
         accelerator = load_accelerator()
         if accelerator is None or not accelerator.capabilities & CAP_ZIP_EXTRACT:
@@ -355,17 +371,27 @@ class Archive:
                     published.append(target)
                     if cancel and cancel():
                         raise Cancelled()
-            except BaseException:
+            except BaseException as publish_error:
+                rollback_failures = []
                 for target in reversed(published):
                     try:
                         os.remove(target)
                     except FileNotFoundError:
                         pass
+                    except OSError as error:
+                        rollback_failures.append(f"remove {target}: {error}")
                 for backup, target in reversed(backups):
                     try:
                         os.replace(backup, target)
-                    except FileNotFoundError:
-                        pass
+                    except OSError as error:
+                        rollback_failures.append(f"restore {backup} -> {target}: {error}")
+                if rollback_failures:
+                    recoverable_backups = [
+                        backup for backup, _target in backups if os.path.exists(backup)
+                    ]
+                    raise NativeRollbackError(
+                        publish_error, rollback_failures, recoverable_backups
+                    ) from publish_error
                 raise
             for backup, _target in backups:
                 try:
