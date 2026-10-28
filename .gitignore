@@ -5,6 +5,7 @@ nativearchive/target/
 shell/build/
 *.spec
 __pycache__/
+nativeaccel/build/
 *.pyc
 
 # tool / IDE state

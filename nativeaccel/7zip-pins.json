@@ -1,0 +1,14 @@
+{
+  "version": "26.04",
+  "source_url": "https://github.com/ip7z/7zip/releases/download/26.04/7z2604-src.tar.xz",
+  "source_sha256": "9691944c0fe0d01bb49373a704fb983fd33bc98b1738695179dfbf99ac1734f6",
+  "binary_sha256": {
+    "7z.dll": "899cd73d7fc60e1c1c35c7de0f5bed3dc69bfe2cecbd48014d868a347970a0b1"
+  },
+  "header_sha256": {
+    "CPP/7zip/Archive/IArchive.h": "a10f38d599dad4926e2f219a577e3b11aa7214d1b4a02fa88ed9c71a5047caec",
+    "CPP/7zip/IStream.h": "c0c8f8df90ec555b5fb73658638edcaf2029c684d7e0a341d048008b5b25bd47",
+    "CPP/7zip/IPassword.h": "2e84e7c3c0f83fd968c1c01df8a0f0153b2af4548a40d837e4d6b001c7e34cb9",
+    "CPP/Common/MyCom.h": "6dea15b95f66427cf468c91137a23dbdc5f4638a90e06d5b53e5fbcbe36fa58f"
+  }
+}

@@ -31,6 +31,7 @@ try {
     $version = (python make_version_files.py).Trim()
     if ($Stage -in "all", "app") {
         & "$root\fetch_tools.ps1"  # tools\: 7-Zip compatibility reader, libarchive, yzip_native (pinned)
+        & "$root\nativeaccel\build.ps1" -OutputDirectory "$root\tools"
         cmd /c "`"$root\shell\build.cmd`" 2>nul" | Select-Object -Last 1
         if ($LASTEXITCODE) { throw "셸 확장 빌드 실패" }
         Sign "$root\shell\build\yzipshell.dll"
@@ -42,9 +43,10 @@ try {
             "--add-data", "LICENSE;.",
             "--add-binary", "shell\build\yzipshell.dll;.", "--add-binary", "tools\7z.exe;tools",
             "--add-binary", "tools\7z.dll;tools", "--add-binary", "tools\libarchive.dll;tools",
+            "--add-binary", "tools\yzip_accel.dll;tools", "--add-data", "tools\7zip-pins.json;tools",
             "--add-binary", "tools\yzip_native.dll;tools", "--add-binary", "tools\zpaq.exe;tools",
             "--add-data", "tools\licenses;tools\licenses",
-            "--hidden-import", "cliarchive", "--hidden-import", "nativearchive", "--hidden-import", "nativearchive_ffi",
+            "--hidden-import", "archive_accel", "--hidden-import", "cliarchive", "--hidden-import", "nativearchive", "--hidden-import", "nativearchive_ffi",
             "--hidden-import", "nativearchive_libarchive", "--hidden-import", "nativearchive_legacy", "--hidden-import", "minifmt",
             "--exclude-module", "PySide6.QtWebEngineCore",
             "--exclude-module", "PySide6.QtQml", "--exclude-module", "PySide6.Qt3DCore",
