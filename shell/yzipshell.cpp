@@ -95,6 +95,26 @@ static std::wstring read_command() {
     return buf;
 }
 
+static DWORD menu_mask() {
+    DWORD value = 7, cb = sizeof(value);
+    LSTATUS result = RegGetValueW(HKEY_CURRENT_USER, L"Software\\yzip", L"MenuMask",
+                                 RRF_RT_REG_DWORD, nullptr, &value, &cb);
+    return result == ERROR_SUCCESS ? value : 7;
+}
+
+static bool english_menu() {
+    wchar_t value[8] = {};
+    DWORD cb = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\yzip", L"Language", RRF_RT_REG_SZ,
+                        nullptr, value, &cb) == ERROR_SUCCESS && lstrcmpW(value, L"en") == 0;
+}
+
+static bool separate_archives() {
+    DWORD value = 0, cb = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\yzip", L"SeparateArchives", RRF_RT_REG_DWORD,
+                        nullptr, &value, &cb) == ERROR_SUCCESS && value != 0;
+}
+
 static std::wstring icon_source() {
     wchar_t buf[2048];
     DWORD cb = sizeof(buf);
@@ -269,6 +289,8 @@ public:
         std::vector<std::wstring> labels;
         into_.clear();
         std::wstring arc_exts = ext_list(L"ArchiveExts"), img_exts = ext_list(L"ImageExts");
+        DWORD enabled = menu_mask();
+        bool english = english_menu();
         bool extractable = true, archives = true;  // every item extractable / every item an archive proper
         for (auto& p : paths_) {
             int k = extract_kind(p, arc_exts, img_exts);
@@ -276,24 +298,30 @@ public:
             archives = archives && k == 1;
         }
         if (extractable) {
+            if (enabled & 2) {
             cmds_.push_back(CMD_HERE);
-            labels.push_back(L"여기에 압축 풀기");
+            labels.push_back(english ? L"Extract here" : L"여기에 압축 풀기");
+            }
+            if (enabled & 4) {
             cmds_.push_back(CMD_FOLDER);
             if (paths_.size() == 1) {  // like Bandizip's "Kings (2)\ 에 풀기": the real folder, numbered if taken
                 into_ = extract_dir(paths_[0]);
                 std::wstring n = file_name(into_);
                 if (n.size() > 52)
                     n = n.substr(0, 24) + L"…" + n.substr(n.size() - 24);
-                labels.push_back(escape_amp(n) + L"\\에 압축 풀기");
+                labels.push_back(english ? L"Extract to " + escape_amp(n) + L"\\" : escape_amp(n) + L"\\에 압축 풀기");
             } else {
-                labels.push_back(L"각각의 폴더에 압축 풀기");
+                labels.push_back(english ? L"Extract to separate folders" : L"각각의 폴더에 압축 풀기");
+            }
             }
         }
-        if (!out_.empty() && !archives) {  // archives get the extract items only
+        if (!out_.empty() && !archives && (enabled & 1)) {  // archives get the extract items only
             cmds_.push_back(CMD_COMPRESS);
-            labels.push_back(menu_label(out_));
+            labels.push_back(paths_.size() > 1 && separate_archives()
+                             ? (english ? L"Compress each item to ZIP - &yzip" : L"각각 ZIP 파일로 압축하기 - &yzip")
+                             : (english ? L"Compress to " + escape_amp(file_name(out_)) + L" - &yzip" : menu_label(out_)));
             cmds_.push_back(CMD_DIALOG);
-            labels.push_back(L"yzip으로 압축하기(&W)...");
+            labels.push_back(english ? L"Compress with yzip(&W)..." : L"yzip으로 압축하기(&W)...");
         }
         if (cmds_.empty())
             return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);

@@ -6,43 +6,29 @@ import shutil
 import sys
 import tempfile
 import time
+from datetime import datetime
 
 import json
 
-from PySide6.QtCore import QEventLoop, QObject, QSize, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QEventLoop, QObject, QSize, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QFont, QFontDatabase, QKeySequence
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QBoxLayout, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFileIconProvider, QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
-                               QMessageBox, QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSlider,
+                               QMessageBox, QLayout, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider,
                                QSpinBox, QStackedWidget, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 import formats
 import ziplib
+import appcore
+import appearance
+from preferences import PreferencesDialog as SettingsDialog
 from appcore import load_settings, log_exception, log_path, outcome, read_list, save_setting, set_low_priority  # noqa: F401
 from version import __version__
 
 APP = "yzip"
-# progress window: one quiet surface, a thin accent bar, a single outlined action
-PROGRESS_QSS = """
-ProgressWindow { background: #ffffff; font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Malgun Gothic'; }
-QLabel { color: #1f2328; font-size: 10pt; padding: 0 2px; }
-QToolButton { color: #57606a; border: none; border-radius: 6px; }
-QToolButton:hover { background: #f0f2f5; color: #1f2328; }
-QToolButton:checked { background: #e7efff; color: #2f6fed; }
-QToolButton:disabled { color: #c4c9cf; }
-QToolButton::menu-indicator { image: none; width: 0; }
-QMenu { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de; padding: 4px; font-size: 9.5pt; }
-QMenu::item { padding: 6px 22px 6px 30px; border-radius: 4px; }
-QMenu::item:selected { background: #f0f2f5; }
-QMenu::indicator { width: 14px; height: 14px; left: 8px; }
-QProgressBar { background: #e9edf2; border: none; border-radius: 3px; max-height: 6px; min-height: 6px; }
-QProgressBar::chunk { background: #2f6fed; border-radius: 3px; }
-QPushButton { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de; border-radius: 6px;
-              padding: 5px 18px; font-size: 9.5pt; }
-QPushButton:hover { background: #f3f5f8; border-color: #b6bfc9; }
-QPushButton:pressed { background: #e9edf2; }
-"""
+from ui_theme import MAIN_QSS, PROGRESS_QSS, DIALOG_QSS
+
 
 
 def fmt_size(n: int) -> str:
@@ -110,11 +96,13 @@ class ProgressWindow(QDialog):
     def __init__(self, parent, title, reveal=None, done_text="작업을 완료했습니다."):
         super().__init__(parent)
         self.title, self.reveal, self.done_text = title, reveal, done_text
+        self.setObjectName("progressWindow")
         self._canceled = self._done = False
         self.start, self.last, self._painted = time.time(), (0, 0), 0.0
         self.setWindowTitle(f"{title} - {APP}")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-        self.setFixedWidth(460)
+        self.setMinimumWidth(460)
+        self.resize(500, 180)
         self.setStyleSheet(PROGRESS_QSS)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 16, 16, 12)
@@ -126,6 +114,10 @@ class ProgressWindow(QDialog):
         self.bar.setRange(0, 100)
         self.bar.setTextVisible(False)
         lay.addWidget(self.bar)
+        hint = QLabel("중지를 누르면 현재 작업을 중단합니다.")
+        hint.setObjectName("progressHint")
+        lay.addWidget(hint)
+        self.progress_hint = hint
         row = QHBoxLayout()
         row.setSpacing(2)
         settings = load_settings()
@@ -159,8 +151,8 @@ class ProgressWindow(QDialog):
 
     def _tool(self, glyph, tip):
         b = QToolButton()
-        b.setText(glyph)
-        b.setFont(_icon_font())
+        b.setIcon(glyph_icon(glyph))
+        b.setIconSize(QSize(16, 16))
         b.setToolTip(tip)
         b.setAccessibleName(tip)
         b.setAutoRaise(True)
@@ -198,8 +190,8 @@ class ProgressWindow(QDialog):
         total = fmt_time(el * t / d) if d and t and el >= 1 and d * 100 >= t else "--:--"
         sep = "&nbsp;&nbsp;·&nbsp;&nbsp;"
         self.label.setText(
-            f"<div style='font-size:10.5pt; font-weight:600; color:#1f2328'>{escape(name)}</div>"
-            f"<div style='font-size:9pt; color:#6e7781; margin-top:3px'>{pct}%{sep}{fmt_size(int(d / el))}/s{sep}"
+            f"<div style='font-size:10.5pt; font-weight:600; color:#202D35'>{escape(name)}</div>"
+            f"<div style='font-size:9pt; color:#64737D; margin-top:3px'>{pct}%{sep}{fmt_size(int(d / el))}/s{sep}"
             f"{fmt_time(el)} / {total}</div>")
 
     def show_done(self):
@@ -210,9 +202,11 @@ class ProgressWindow(QDialog):
         self.bar.setValue(100)
         self.setWindowTitle(f"100% {self.title} - {APP}")
         self.label.setText(
-            f"<div style='font-size:10.5pt; font-weight:600; color:#1f2328'>{escape(self.done_text)}</div>"
-            f"<div style='font-size:9pt; color:#6e7781; margin-top:3px'>{fmt_size(t)}&nbsp;&nbsp;·&nbsp;&nbsp;"
+            f"<div style='font-size:10.5pt; font-weight:600; color:#202D35'>{escape(self.done_text)}</div>"
+            f"<div style='font-size:9pt; color:#64737D; margin-top:3px'>{fmt_size(t)}&nbsp;&nbsp;·&nbsp;&nbsp;"
             f"걸린 시간 {fmt_time(el)}</div>")
+        self.progress_hint.setText("작업을 마쳤습니다. 폴더를 열거나 창을 닫으세요." if self.reveal
+                                   else "작업을 완료했습니다.")
         self.stop_btn.setText("닫기")
         self.stop_btn.setEnabled(True)
         self.stop_btn.setDefault(True)
@@ -302,8 +296,17 @@ class CompressDialog(QDialog):
     def __init__(self, parent, default_path: str, paths=None):
         super().__init__(parent)
         self.setWindowTitle("압축 파일 만들기")
-        self.setMinimumWidth(460)
+        settings = load_settings()
+        self.setMinimumWidth(520)
+        self.setStyleSheet(DIALOG_QSS)
         lay = QFormLayout(self)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setHorizontalSpacing(18)
+        lay.setVerticalSpacing(12)
+        lay.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        title = QLabel("압축 파일 만들기")
+        title.setObjectName("dialogTitle")
+        lay.addRow(title)
         self.fmt = QComboBox()
         one_file = bool(paths) and len(paths) == 1 and os.path.isfile(paths[0])
         self.one_file = os.path.basename(paths[0]) if one_file else None
@@ -312,6 +315,8 @@ class CompressDialog(QDialog):
             if f.single and not one_file:  # gz/bz2/xz/zst hold exactly one file
                 self.fmt.model().item(self.fmt.count() - 1).setEnabled(False)
         lay.addRow("형식", self.fmt)
+        if settings.get("compress_dir"):
+            default_path = unique_path(os.path.join(settings["compress_dir"], os.path.basename(default_path)))
         self.path = QLineEdit(default_path)
         b = QPushButton("찾아보기")
         b.clicked.connect(self._browse)
@@ -321,8 +326,8 @@ class CompressDialog(QDialog):
         lay.addRow("파일 이름", row)
         self.level = QSlider(Qt.Horizontal)
         self.level.setRange(0, 9)
-        self.level.setValue(6)
-        self.level_lbl = QLabel("6")
+        self.level.setValue(int(settings.get("compress_level", 6)))
+        self.level_lbl = QLabel("저장(압축 안 함)" if self.level.value() == 0 else str(self.level.value()))
         self.level.valueChanged.connect(lambda v: self.level_lbl.setText("저장(압축 안 함)" if v == 0 else str(v)))
         row = QHBoxLayout()
         row.addWidget(self.level)
@@ -331,6 +336,7 @@ class CompressDialog(QDialog):
         self.split = QComboBox()
         self.split.setEditable(True)
         self.split.addItems(["분할 안 함", "100MB", "650MB", "700MB", "1440KB", "4GB"])
+        self.split.setCurrentText(str(settings.get("compress_split", "분할 안 함")))
         lay.addRow("분할 압축", self.split)
         self.pw = QLineEdit()
         self.pw.setEchoMode(QLineEdit.Password)
@@ -343,14 +349,22 @@ class CompressDialog(QDialog):
         lay.addRow("암호 확인", self.pw2)
         lay.addRow("", self.show_pw)
         self.pw_note = QLabel("암호를 입력하면 AES-256으로 암호화됩니다.")
+        self.pw_note.setObjectName("dialogHint")
+        self.pw_note.setWordWrap(True)
         lay.addRow("", self.pw_note)
         self.excl = QLineEdit(".tmp, Thumbs.db, .DS_Store")
         lay.addRow("제외할 이름 끝", self.excl)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("압축하기")
+        bb.button(QDialogButtonBox.Cancel).setText("취소")
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
         lay.addRow(bb)
         self.fmt.currentIndexChanged.connect(self._format_changed)
+        preferred = formats.BY_ID.get(settings.get("compress_format", "zip"), formats.BY_ID["zip"])
+        if preferred.single and not one_file:
+            preferred = formats.BY_ID["zip"]
+        self.fmt.setCurrentIndex(self.fmt.findData(preferred.id))
         self._format_changed()
 
     def current_format(self) -> "formats.Fmt":
@@ -432,9 +446,18 @@ class ExtractDialog(QDialog):
     def __init__(self, parent, default_dir: str, n_selected: int):
         super().__init__(parent)
         self.setWindowTitle("압축 풀기")
-        self.setMinimumWidth(460)
+        settings = load_settings()
+        self.setMinimumWidth(520)
+        self.setStyleSheet(DIALOG_QSS)
         lay = QFormLayout(self)
-        self.dest = QLineEdit(default_dir)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setHorizontalSpacing(18)
+        lay.setVerticalSpacing(12)
+        lay.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        title = QLabel("압축 풀기")
+        title.setObjectName("dialogTitle")
+        lay.addRow(title)
+        self.dest = QLineEdit(settings.get("extract_dir") or default_dir)
         b = QPushButton("찾아보기")
         b.clicked.connect(lambda: self.dest.setText(QFileDialog.getExistingDirectory(self, "폴더", self.dest.text()) or self.dest.text()))
         row = QHBoxLayout()
@@ -451,27 +474,32 @@ class ExtractDialog(QDialog):
             self.sel_only.hide()
         # what happens to existing files and the smart folder: sensible defaults, folded away
         self.more = QToolButton()
-        self.more.setText("▸ 옵션 더 보기")
+        self.more.setText("옵션 더 보기")
+        self.more.setArrowType(Qt.DownArrow)
+        self.more.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.more.setCheckable(True)
-        self.more.setStyleSheet("QToolButton { border: none; color: #2f6fed; padding: 2px 0; }")
+        self.more.setObjectName("extractOptions")
         lay.addRow("", self.more)
         opts = QWidget()
         box = QVBoxLayout(opts)
         box.setContentsMargins(0, 0, 0, 0)
+        self.mode_ask = QRadioButton("이미 있으면 확인")
         self.mode_over = QRadioButton("모두 덮어쓰기")
         self.mode_skip = QRadioButton("이미 있으면 건너뛰기")
         self.mode_ren = QRadioButton("이름 자동 변경: name (2).txt")
-        self.mode_over.setChecked(True)
+        modes = {"ask": self.mode_ask, "overwrite": self.mode_over, "skip": self.mode_skip, "rename": self.mode_ren}
+        modes.get(settings.get("extract_mode", "ask"), self.mode_ask).setChecked(True)
         self.smart = QCheckBox("스마트 풀기: 최상위 항목이 여럿이면 압축 파일 이름 폴더에 풀기")
-        self.smart.setChecked(True)
-        for w in (self.mode_over, self.mode_skip, self.mode_ren, self.smart):
+        self.smart.setChecked(bool(settings.get("extract_smart", True)))
+        self.smart.setText("스마트 풀기: 항목이 여럿이면 하위 폴더 생성")
+        for w in (self.mode_ask, self.mode_over, self.mode_skip, self.mode_ren, self.smart):
             box.addWidget(w)
         opts.setVisible(False)
         lay.addRow("", opts)
 
         def fold(on):
             opts.setVisible(on)
-            self.more.setText(("▾" if on else "▸") + " 옵션 더 보기")
+            self.more.setArrowType(Qt.UpArrow if on else Qt.DownArrow)
             self.adjustSize()
         self.more.toggled.connect(fold)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -552,73 +580,6 @@ def smart_dest(archive, dest: str, arc_path: str) -> str:
     return unique_dir(os.path.join(dest, formats.stem(arc_path)))
 
 
-MAIN_QSS = """
-QMainWindow, #home, #listPage { background: #ffffff; }
-QToolBar { background: #ffffff; border: none; border-bottom: 1px solid #eef1f4; padding: 8px 12px; spacing: 4px; }
-QToolBar QToolButton { color: #1f2328; font-size: 9.5pt; padding: 6px 12px; border-radius: 7px; }
-QToolBar QToolButton:hover { background: #f0f2f5; }
-QToolBar QToolButton:pressed { background: #e6e9ee; }
-QToolBar QToolButton:disabled { color: #b0b7bf; }
-QToolBar QToolButton#primary { background: #2f6fed; color: #ffffff; font-weight: 600; padding: 6px 16px; }
-QToolBar QToolButton#primary:hover { background: #255fd6; }
-QToolBar QToolButton#primary:pressed { background: #1f52bb; }
-QToolBar QToolButton::menu-indicator { image: none; width: 0; }
-
-#updBar { background: #eef4ff; border-bottom: 1px solid #d6e3ff; }
-#updText { color: #1f2328; font-size: 9.5pt; }
-QPushButton#updBtn { background: #2f6fed; color: #ffffff; border: none; border-radius: 6px; padding: 5px 14px;
-                     font-size: 9pt; font-weight: 600; }
-QPushButton#updBtn:hover { background: #255fd6; }
-QToolButton#updLater { border: none; color: #57606a; padding: 5px 8px; font-size: 9pt; }
-#archHead { background: #ffffff; }
-#archBadge { color: #ffffff; font-size: 9pt; font-weight: 700; border-radius: 10px; }
-#archName { color: #1f2328; font-size: 13.5pt; font-weight: 600; }
-#archMeta { color: #6e7781; font-size: 9.5pt; }
-#lockPill { color: #9a6700; background: #fff8c5; border: 1px solid #f2e3a0; border-radius: 9px;
-            padding: 1px 9px; font-size: 8.5pt; font-weight: 600; }
-
-#crumbBar { background: #ffffff; border-top: 1px solid #eef1f4; border-bottom: 1px solid #eef1f4; }
-#crumbBar QToolButton { border: none; border-radius: 6px; padding: 3px 7px; color: #57606a; font-size: 9.5pt; }
-#crumbBar QToolButton:hover { background: #f0f2f5; color: #1f2328; }
-#crumbBar QToolButton:disabled { color: #c4c9cf; }
-#crumbBar QToolButton#crumbLast { color: #1f2328; font-weight: 600; }
-#crumbSep { color: #b0b7bf; font-size: 9pt; }
-
-QTreeWidget { border: none; font-size: 9.5pt; color: #1f2328; outline: 0; background: #ffffff; }
-QTreeWidget::item { height: 30px; border: none; padding-left: 4px; }
-QTreeWidget::item:hover { background: #f5f7fa; }
-QTreeWidget::item:selected { background: #e7efff; color: #1f2328; }
-QTreeWidget::item:selected:active { background: #dce8ff; }
-QHeaderView { background: #ffffff; }
-QHeaderView::section { background: #ffffff; color: #6e7781; border: none; border-bottom: 1px solid #eef1f4;
-                       padding: 7px 8px; font-size: 9pt; }
-QHeaderView::section:hover { color: #1f2328; }
-QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
-QScrollBar::handle:vertical { background: #d0d7de; border-radius: 3px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #b6bfc9; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QStatusBar { background: #ffffff; color: #6e7781; font-size: 9pt; border-top: 1px solid #eef1f4; }
-
-#homeTitle { color: #1f2328; font-size: 16pt; font-weight: 600; }
-#homeHint { color: #6e7781; font-size: 10pt; }
-#homeDrop { border: 2px dashed #d5dbe2; border-radius: 16px; background: #fafbfc; }
-#homeDrop[hot="true"] { border-color: #2f6fed; background: #f2f6ff; }
-QPushButton#homeBtn { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de; border-radius: 8px;
-                      padding: 10px 24px; font-size: 10pt; }
-QPushButton#homeBtn:hover { background: #f3f5f8; border-color: #b6bfc9; }
-QPushButton#homeMain { background: #2f6fed; color: #ffffff; border: none; border-radius: 8px;
-                       padding: 10px 24px; font-size: 10pt; font-weight: 600; }
-QPushButton#homeMain:hover { background: #255fd6; }
-#homeFoot { color: #8c959f; font-size: 8.5pt; }
-QMenu { background: #ffffff; color: #1f2328; border: 1px solid #d0d7de; border-radius: 8px; padding: 5px;
-        font-size: 9.5pt; }
-QMenu::item { padding: 7px 26px 7px 12px; border-radius: 5px; }
-QMenu::item:selected { background: #f0f2f5; }
-QMenu::item:disabled { color: #b0b7bf; }
-QMenu::icon { padding-left: 8px; }
-QMenu::separator { height: 1px; background: #eef1f4; margin: 5px 8px; }
-"""
-
 # Segoe Fluent Icons / MDL2 code points
 G_EXTRACT, G_OPEN, G_ADD, G_MORE, G_UP, G_LOCK, G_TEST, G_DELETE, G_HOME = (
     "", "", "", "", "", "", "", "", "")
@@ -626,7 +587,7 @@ _FMT_COLOR = {"ZIP": "#2f6fed", "7Z": "#1a7f37", "TAR": "#8250df", "TAR.GZ": "#8
               "TAR.XZ": "#8250df", "TAR.ZST": "#8250df"}
 
 
-def glyph_icon(ch: str, color: str = "#57606a", px: int = 16):
+def glyph_icon(ch: str, color: str = "#64737D", px: int = 16):
     """Icon drawn from the system icon font, crisp at any DPI and free of image assets."""
     from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
     scale = 2
@@ -645,83 +606,6 @@ def glyph_icon(ch: str, color: str = "#57606a", px: int = 16):
 
 class _Bridge(QObject):
     done = Signal(object, object)  # (result, error) from a worker thread, delivered on the GUI thread
-
-
-class SettingsDialog(QDialog):
-    """Application preferences that affect the per-user Windows integration."""
-
-    def __init__(self, parent):
-        import assoc
-        super().__init__(parent)
-        self.assoc = assoc
-        self.setWindowTitle("환경설정")
-        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-        self.setMinimumWidth(430)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 16)
-        lay.setSpacing(10)
-
-        title = QLabel("yzip 환경설정")
-        title.setStyleSheet("font-size: 11pt; font-weight: 600; color: #1f2328;")
-        lay.addWidget(title)
-        self.auto_update_check = QCheckBox("업데이트 자동 확인")
-        self.auto_update_check.setAccessibleName("업데이트 자동 확인")
-        self.auto_update_check.setChecked(bool(load_settings().get("auto_update", True)))
-        lay.addWidget(self.auto_update_check)
-        update_hint = QLabel("yzip을 실행할 때마다 최신 버전을 확인하고, 새 버전이 있으면 팝업으로 묻습니다.")
-        update_hint.setWordWrap(True)
-        update_hint.setStyleSheet("color: #6e7781; font-size: 9pt;")
-        lay.addWidget(update_hint)
-        self.assoc_check = QCheckBox("파일 연결하기")
-        self.assoc_check.setAccessibleName("파일 연결하기")
-        self.assoc_check.setChecked(assoc.enabled())
-        lay.addWidget(self.assoc_check)
-        hint = QLabel("아래 목록의 파일 확장자를 한꺼번에 yzip으로 여는 연결로 등록합니다.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #6e7781; font-size: 9pt;")
-        lay.addWidget(hint)
-        list_title = QLabel(f"지원하는 파일 형식 ({len(formats.SUPPORTED_TYPES)}개)")
-        list_title.setStyleSheet("font-weight: 600; color: #1f2328;")
-        lay.addWidget(list_title)
-        self.assoc_list = QTreeWidget()
-        self.assoc_list.setAccessibleName("연결 가능한 파일 형식 목록")
-        self.assoc_list.setHeaderLabels(["확장자", "파일 형식", "파일 연결"])
-        self.assoc_list.setRootIsDecorated(False)
-        self.assoc_list.setSelectionMode(QTreeWidget.NoSelection)
-        self.assoc_list.setFocusPolicy(Qt.NoFocus)
-        self.assoc_list.setEditTriggers(QTreeWidget.NoEditTriggers)
-        self.assoc_list.setMinimumHeight(170)
-        self.assoc_list.setMaximumHeight(240)
-        self.assoc_list.setColumnWidth(0, 90)
-        self.assoc_list.setColumnWidth(2, 110)
-        self.assoc_list.header().setStretchLastSection(True)
-        for ext, label in formats.SUPPORTED_TYPES.items():
-            can_associate = ext in assoc.TYPES
-            state = "가능" if can_associate else "지원(연결 제외)"
-            item = QTreeWidgetItem([ext, label, state])
-            if not can_associate:
-                item.setForeground(2, Qt.darkGray)
-            self.assoc_list.addTopLevelItem(item)
-        lay.addWidget(self.assoc_list)
-        note = QLabel("EXE는 자체 압축 실행 파일만 열 수 있습니다. 일반 .exe를 yzip으로 연결하면 Windows 프로그램 실행이 막히므로 파일 연결 대상에서는 제외했습니다.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #6e7781; font-size: 8.5pt;")
-        lay.addWidget(note)
-        lay.addStretch()
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("적용")
-        buttons.button(QDialogButtonBox.Cancel).setText("취소")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        lay.addWidget(buttons)
-
-    def apply(self):
-        if self.assoc_check.isChecked():
-            self.assoc.register()
-        else:
-            self.assoc.unregister()
-        save_setting("auto_update", self.auto_update_check.isChecked())
 
 
 class AssocDialog(QDialog):
@@ -814,6 +698,39 @@ class _Row(QTreeWidgetItem):
         return ka < kb
 
 
+class _ResponsiveRow(QWidget):
+    """Keep natural control sizes, stacking only when the row cannot fit."""
+
+    def __init__(self, margins=(0, 0, 0, 0), spacing=12):
+        super().__init__()
+        self._pending_reflow = False
+        self.row = QBoxLayout(QBoxLayout.LeftToRight, self)
+        self.row.setContentsMargins(*margins)
+        self.row.setSpacing(spacing)
+        self.row.setSizeConstraints(QLayout.SetNoConstraint, QLayout.SetMinimumSize)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in (QEvent.Resize, QEvent.LayoutRequest, QEvent.StyleChange, QEvent.FontChange) \
+                and hasattr(self, "row") and not self._pending_reflow:
+            self._pending_reflow = True
+            QTimer.singleShot(0, self._reflow)
+        return result
+
+    def _reflow(self):
+        self._pending_reflow = False
+        margins = self.row.contentsMargins()
+        widths = [self.row.itemAt(i).widget().sizeHint().width()
+                  for i in range(self.row.count()) if self.row.itemAt(i).widget() is not None]
+        required = sum(widths) + self.row.spacing() * max(0, len(widths) - 1)
+        direction = (QBoxLayout.TopToBottom if required > self.width() - margins.left() - margins.right()
+                     else QBoxLayout.LeftToRight)
+        if self.row.direction() != direction:
+            self.row.setDirection(direction)
+        self.updateGeometry()
+
+
 class Main(QMainWindow):
     """Browse an archive like a folder and extract it, or make a new one. The rarely used (add, delete,
     test, details, Explorer menu setup) sits in the '더 보기' menu and the list's right-click menu."""
@@ -824,8 +741,8 @@ class Main(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP} {__version__}")
-        self.resize(860, 560)
-        self.setMinimumSize(560, 380)
+        self.resize(640, 454)
+        self.setMinimumSize(640, 420)
         self.setAcceptDrops(True)
         self.setStyleSheet(MAIN_QSS)
         self.arc_path: str | None = None
@@ -858,6 +775,7 @@ class Main(QMainWindow):
         cl = QVBoxLayout(central)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
+        cl.addWidget(self._app_header())
         cl.addWidget(self._update_bar())
         cl.addWidget(self.pages, 1)
         self.setCentralWidget(central)
@@ -867,62 +785,133 @@ class Main(QMainWindow):
         self._actions()
         self._show_details(bool(load_settings().get("show_details")))
         self._set_page(False)
+        appearance.apply_appearance(QApplication.instance())
 
     # ----- pages -----
+    def _app_header(self) -> QWidget:
+        head = _ResponsiveRow(margins=(24, 12, 24, 12))
+        head.setObjectName("appHeader")
+        row = head.row
+        branding = QWidget()
+        brand_row = QHBoxLayout(branding)
+        brand_row.setContentsMargins(0, 0, 0, 0)
+        brand = QLabel("yzip")
+        brand.setObjectName("brand")
+        brand_row.addWidget(brand)
+        version = QLabel(__version__)
+        version.setObjectName("appVersion")
+        brand_row.addWidget(version)
+        brand_row.addStretch()
+        row.addWidget(branding)
+        actions = _ResponsiveRow(spacing=6)
+        actions.setObjectName("headerActions")
+        self.home_btn = QPushButton("홈")
+        self.home_btn.setObjectName("homeNav")
+        self.home_btn.clicked.connect(self.go_home)
+        self.settings_btn = QPushButton("환경설정")
+        self.settings_btn.setObjectName("settingsButton")
+        self.settings_btn.clicked.connect(lambda: self.preferences())
+        self.update_check_btn = QPushButton("업데이트 확인")
+        self.update_check_btn.setObjectName("updateCheckButton")
+        self.update_check_btn.clicked.connect(lambda: self.start_update_check(manual=True))
+        for button in (self.home_btn, self.settings_btn, self.update_check_btn):
+            actions.row.addWidget(button)
+        row.addWidget(actions, 1)
+        return head
+
+    def go_home(self):
+        """Close the archive view so home drops always create a new archive."""
+        self.search.clear()
+        self.tree.clearSelection()
+        self.arc_path = self.password = None
+        self.entries = []
+        self.dirs = {}
+        self.cwd = ""
+        self.tree.clear()
+        self.setWindowTitle(f"{APP} {__version__}")
+        self._set_page(False)
+
     def _home(self) -> QWidget:
-        """Start page: a drop zone with the two things people come for."""
+        scroll = self.home_scroll = QScrollArea()
+        scroll.setObjectName("homeScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QScrollArea.NoFrame)
         page = QWidget()
         page.setObjectName("home")
         outer = QVBoxLayout(page)
-        outer.setContentsMargins(32, 32, 32, 20)
+        outer.setSizeConstraints(QLayout.SetNoConstraint, QLayout.SetMinimumSize)
+        outer.setContentsMargins(24, 16, 24, 12)
+        outer.setSpacing(8)
+        outer.setAlignment(Qt.AlignTop)
+        title = self.homeTitle = QLabel("압축 파일 작업, 간편하게")
+        title.setObjectName("homeTitle")
+        title.setWordWrap(True)
+        outer.addWidget(title)
+        intro = QLabel("압축 파일을 열고 풀거나, 파일과 폴더를 하나로 모으세요.")
+        intro.setObjectName("homeHint")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
         box = self.drop_zone = QWidget()
         box.setObjectName("homeDrop")
         box.setAttribute(Qt.WA_StyledBackground, True)
         lay = QVBoxLayout(box)
-        lay.setSpacing(10)
-        lay.addStretch(3)
-        if os.path.exists(resource("yzip.ico")):
-            from PySide6.QtGui import QIcon
-            icon = QLabel()
-            icon.setPixmap(QIcon(resource("yzip.ico")).pixmap(72, 72))
-            icon.setAlignment(Qt.AlignCenter)
-            lay.addWidget(icon)
-            lay.addSpacing(6)
-        title = QLabel("파일을 여기로 끌어다 놓으세요")
-        title.setObjectName("homeTitle")
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(8)
+        drop_title = QLabel("파일을 여기로 끌어다 놓으세요")
+        drop_title.setObjectName("dropTitle")
+        drop_title.setWordWrap(True)
         hint = QLabel("압축 파일은 바로 열고, 다른 파일·폴더는 새로 압축합니다")
         hint.setObjectName("homeHint")
-        for w in (title, hint):
-            w.setAlignment(Qt.AlignCenter)
-            lay.addWidget(w)
-        lay.addSpacing(16)
-        row = QHBoxLayout()
-        row.setSpacing(10)
+        hint.setWordWrap(True)
+        lay.addWidget(drop_title)
+        lay.addWidget(hint)
+        actions = _ResponsiveRow()
+        actions.setObjectName("homeActions")
+        row = actions.row
+        self.home_open_btn = QPushButton("압축 파일 열기")
+        self.home_open_btn.setObjectName("homeMain")
+        self.home_open_btn.clicked.connect(lambda: self.open_dialog())
+        self.home_new_btn = QPushButton("새로 압축하기")
+        self.home_new_btn.setObjectName("homeBtn")
+        self.home_new_btn.clicked.connect(lambda: self.new_archive())
+        for button, text in ((self.home_open_btn, "내용 보기·풀기  ·  Ctrl+O"),
+                             (self.home_new_btn, "파일·폴더 압축  ·  Ctrl+N")):
+            column = QWidget()
+            col = QVBoxLayout(column)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(4)
+            col.addWidget(button)
+            note = QLabel(text)
+            note.setObjectName("homeActionHint")
+            note.setWordWrap(False)
+            col.addWidget(note)
+            row.addWidget(column)
         row.addStretch()
-        b_open = QPushButton("  압축 파일 열기")
-        b_open.setObjectName("homeMain")
-        b_open.setIcon(glyph_icon(G_OPEN, "#ffffff"))
-        b_open.clicked.connect(self.open_dialog)
-        b_new = QPushButton("  새로 압축하기")
-        b_new.setObjectName("homeBtn")
-        b_new.setIcon(glyph_icon(G_ADD, "#1f2328"))
-        b_new.clicked.connect(lambda: self.new_archive())
-        b_settings = self.settings_btn = QPushButton("  환경설정")
-        b_settings.setObjectName("homeBtn")
-        b_settings.clicked.connect(self.preferences)
-        for b in (b_open, b_new, b_settings):
-            b.setCursor(Qt.PointingHandCursor)
-            row.addWidget(b)
-        row.addStretch()
-        lay.addLayout(row)
-        lay.addStretch(4)
+        lay.addSpacing(4)
+        lay.addWidget(actions)
         outer.addWidget(box)
-        foot = QLabel(f"ZIP · 7Z · TAR · GZ · BZ2 · XZ · ZST  ·  yzip {__version__}")
-        foot.setObjectName("homeFoot")
-        foot.setAlignment(Qt.AlignCenter)
-        outer.addSpacing(10)
-        outer.addWidget(foot)
-        return page
+        self.homeFoot = QLabel("열기·풀기: ZIP · 7Z · RAR · EGG · ALZ · TAR · ISO · CAB · ZIPX · LZH · ZPAQ")
+        self.homeFoot.setObjectName("homeFoot")
+        self.homeFoot.setWordWrap(True)
+        outer.addWidget(self.homeFoot)
+        create = QLabel("만들기: ZIP · 7Z · TAR 계열 · GZ · BZ2 · XZ" +
+                        (" · ZST" if "zst" in formats.BY_ID else ""))
+        create.setObjectName("homeCreateFormats")
+        create.setWordWrap(True)
+        outer.addWidget(create)
+        bottom = QHBoxLayout()
+        self.formats_btn = QPushButton("상세 지원 형식")
+        self.formats_btn.setObjectName("formatsLink")
+        self.formats_btn.clicked.connect(lambda: self.preferences(section="associations"))
+        bottom.addWidget(self.formats_btn)
+        bottom.addStretch()
+        version = QLabel(f"yzip {__version__}")
+        version.setObjectName("homeVersion")
+        bottom.addWidget(version)
+        outer.addLayout(bottom)
+        scroll.setWidget(page)
+        return scroll
 
     def _list_page(self) -> QWidget:
         page = QWidget()
@@ -947,6 +936,8 @@ class Main(QMainWindow):
         name_row.setSpacing(8)
         self.arch_name = QLabel()
         self.arch_name.setObjectName("archName")
+        self.arch_name.setTextFormat(Qt.PlainText)
+        self.arch_name.setWordWrap(True)
         self.lock = QLabel("암호")
         self.lock.setObjectName("lockPill")
         name_row.addWidget(self.arch_name)
@@ -954,6 +945,7 @@ class Main(QMainWindow):
         name_row.addStretch()
         self.arch_meta = QLabel()
         self.arch_meta.setObjectName("archMeta")
+        self.arch_meta.setWordWrap(True)
         txt.addLayout(name_row)
         txt.addWidget(self.arch_meta)
         hl.addLayout(txt, 1)
@@ -969,6 +961,21 @@ class Main(QMainWindow):
         self.up_btn.setToolTip("상위 폴더 (Backspace)")
         self.up_btn.clicked.connect(self.go_up)
         lay.addWidget(bar)
+        search_bar = QWidget()
+        search_bar.setObjectName("searchBar")
+        search_row = QHBoxLayout(search_bar)
+        search_row.setContentsMargins(18, 8, 18, 8)
+        self.search = QLineEdit()
+        self.search.setObjectName("archiveSearch")
+        self.search.setPlaceholderText("현재 폴더에서 파일 이름 검색")
+        self.search.setAccessibleName("현재 폴더에서 파일 이름 검색")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter_items)
+        search_row.addWidget(self.search, 1)
+        self.search_summary = QLabel()
+        self.search_summary.setObjectName("searchSummary")
+        search_row.addWidget(self.search_summary)
+        lay.addWidget(search_bar)
         lay.addWidget(self.tree, 1)
         return page
 
@@ -977,6 +984,7 @@ class Main(QMainWindow):
         self.toolbar.setVisible(has_archive)
         for a in self.archive_acts:
             a.setEnabled(has_archive)
+        self.a_extract.setEnabled(has_archive and bool(self._extraction_scope()[0] or not self.search.text().strip()))
         self.status.setVisible(has_archive)
         if not has_archive:
             self.status.showMessage("")
@@ -1011,7 +1019,7 @@ class Main(QMainWindow):
         tb.setIconSize(QSize(16, 16))
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         tb.setContextMenuPolicy(Qt.PreventContextMenu)
-        self.addToolBar(tb)
+        self.centralWidget().layout().insertWidget(2, tb)
         tb.addAction(self.a_extract)
         tb.widgetForAction(self.a_extract).setObjectName("primary")
         tb.addAction(self.a_open)
@@ -1108,6 +1116,14 @@ class Main(QMainWindow):
 
     def _update_result(self, rel, err, manual):
         from version import __version__
+        checked = datetime.now().astimezone().isoformat(timespec="seconds")
+        result = (f"업데이트 확인 실패: {err}" if err is not None else
+                  f"새 버전: {rel.version}" if rel is not None else f"최신 버전: {__version__}")
+        appcore.save_setting("update_last_checked", checked)
+        appcore.save_setting("update_last_result", result)
+        self.status.showMessage(result, 10000)
+        if err is not None:
+            log_exception(err)
         if rel is not None:
             self.release = rel
             self.upd_text.setText(f"새 버전 <b>yzip {rel.version}</b>이(가) 나왔습니다. 지금 버전: {__version__}")
@@ -1149,16 +1165,25 @@ class Main(QMainWindow):
     def associations(self):
         AssocDialog(self).exec()
 
-    def preferences(self):
+    def preferences(self, section=None):
         dlg = SettingsDialog(self)
+        if section == "associations":
+            dlg.tabs.setCurrentIndex(1)
         if dlg.exec() != QDialog.Accepted:
             return
         try:
-            dlg.apply()
+            if dlg.apply() is False:
+                return
+            appearance.apply_appearance(QApplication.instance())
+            appcore.apply_runtime_settings()
+            if load_settings().get("shell_enabled", True):
+                shell_register()
+            else:
+                shell_unregister()
             self.a_auto_update.setChecked(dlg.auto_update_check.isChecked())
         except Exception as exc:
             log_exception(exc)
-            QMessageBox.warning(self, APP, f"파일 연결을 변경하지 못했습니다.\n{exc}")
+            QMessageBox.warning(self, APP, f"환경설정을 적용하지 못했습니다.\n{exc}")
 
     # ----- drag & drop -----
     def _hot(self, on: bool):
@@ -1217,6 +1242,8 @@ class Main(QMainWindow):
             entries = a.entries()
             enc = a.needs_password()
         same = path == self.arc_path
+        if not same:
+            self.search.clear()
         self.arc_path, self.password, self.entries = path, pw, entries
         # folders the archive implies but does not list ("a/b/c.txt" alone still has folders a/ and a/b/)
         self.dirs = {}
@@ -1234,7 +1261,7 @@ class Main(QMainWindow):
         label = (entries[0].method if entries and entries[0].method in _FMT_COLOR else
                  "ZIP" if formats.is_zip(path) else os.path.splitext(path)[1].lstrip(".").upper() or "?")
         self.badge.setText(label.split(".")[-1] if len(label) > 4 else label)
-        self.badge.setStyleSheet(f"background: {_FMT_COLOR.get(label, '#57606a')};")
+        self.badge.setStyleSheet("background: #16776A;")
         self.arch_name.setText(os.path.basename(path))
         ratio = f" ({packed * 100 // tot}%)" if tot else ""
         self.arch_meta.setText(f"{label}  ·  파일 {files:,}개  ·  {fmt_size(tot)} → {fmt_size(packed)}{ratio}")
@@ -1291,6 +1318,24 @@ class Main(QMainWindow):
         self.tree.sortByColumn(self.tree.sortColumn() if self.tree.sortColumn() >= 0 else 0,
                                self.tree.header().sortIndicatorOrder())
         self._crumbs()
+        self._filter_items()
+
+    def _filter_items(self, _text=None):
+        """Filter direct children only; hidden rows cannot remain selected."""
+        query = self.search.text().strip().casefold()
+        count = 0
+        self.tree.blockSignals(True)
+        try:
+            for index in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(index)
+                visible = query in item.text(0).casefold()
+                if not visible:
+                    item.setSelected(False)
+                item.setHidden(not visible)
+                count += visible
+        finally:
+            self.tree.blockSignals(False)
+        self.search_summary.setText(f"{count:,} / {self.tree.topLevelItemCount():,}")
         self._selection_changed()
 
     def _crumbs(self):
@@ -1322,6 +1367,7 @@ class Main(QMainWindow):
     def go_to(self, folder: str):
         if folder == "" or folder in self.dirs:
             self.cwd = folder
+            self.search.clear()
             self._fill()
 
     def go_up(self):
@@ -1333,6 +1379,8 @@ class Main(QMainWindow):
         items = self.tree.selectedItems()
         if not self.arc_path:
             return
+        self.a_extract.setEnabled(self.pages.currentIndex() == 1 and
+                                  bool(self._extraction_scope()[0] or not self.search.text().strip()))
         if items:
             n = len(self.selected_names())
             self.status.showMessage(f"{len(items)}개 선택 ({n:,}개 파일 포함)" if n != len(items) else f"{len(items)}개 선택")
@@ -1341,8 +1389,13 @@ class Main(QMainWindow):
 
     def selected_names(self) -> list[str]:
         """Archive names under the selection: a selected folder stands for everything inside it."""
+        return self._names_for_items(self.tree.selectedItems())
+
+    def _names_for_items(self, items) -> list[str]:
         out = []
-        for it in self.tree.selectedItems():
+        for it in items:
+            if it.isHidden():
+                continue
             name = it.data(0, self.NAME)
             if it.data(0, self.IS_DIR):
                 out += [e.name for e in self.entries if e.name.startswith(name)]
@@ -1351,6 +1404,15 @@ class Main(QMainWindow):
             else:
                 out.append(name)
         return list(dict.fromkeys(out))
+
+    def _extraction_scope(self):
+        """Return selected names, or visible search results, and their source."""
+        names = self.selected_names()
+        from_search = bool(self.search.text().strip()) and not names
+        if from_search:
+            names = self._names_for_items(self.tree.topLevelItem(i)
+                                          for i in range(self.tree.topLevelItemCount()))
+        return names, from_search
 
     def _activate(self, it, col=0):
         if it.data(0, self.IS_DIR):
@@ -1383,13 +1445,29 @@ class Main(QMainWindow):
             paths = QFileDialog.getOpenFileNames(parent, "압축할 파일 선택")[0]
         if not paths:
             return
+        settings = load_settings()
+        if standalone and len(paths) > 1 and not out and settings.get("shell_multi", "combined") == "separate":
+            for path in paths:
+                self.new_archive([path], standalone=True, ask=ask)
+            return
         first = os.path.abspath(paths[0])
         if len(paths) > 1:
             base = os.path.join(os.path.dirname(first), os.path.basename(os.path.dirname(first)) or "archive")
         else:
             base = first if os.path.isdir(first) else os.path.splitext(first)[0]  # folder "v1.2" stays "v1.2"
+        default_path = base + ".zip"
+        if settings.get("compress_dir"):
+            default_path = os.path.join(settings["compress_dir"], os.path.basename(default_path))
+        default_path = unique_path(default_path)
         if not ask:  # like Bandizip's "<name>.zip으로 압축하기": no options, just a progress window
-            out, o = out or unique_path(base + ".zip"), {"fmt": "zip"}
+            defaults = CompressDialog(parent, default_path, paths)
+            if out:  # the shell menu explicitly promised this ZIP name and location
+                defaults.fmt.setCurrentIndex(defaults.fmt.findData("zip"))
+                defaults.path.setText(out)
+                defaults.split.setCurrentText(str(settings.get("compress_split", "분할 안 함")))
+            o = defaults.options()
+            out = o.pop("out_path")
+            defaults.deleteLater()
             import appcore
             first_out = out
             out = writable_target(
@@ -1399,7 +1477,7 @@ class Main(QMainWindow):
             if not out:
                 return
         else:
-            dlg = CompressDialog(parent, unique_path(base + ".zip"), paths)
+            dlg = CompressDialog(parent, default_path, paths)
             auto = os.environ.get("YZIP_AUTOACCEPT")
             if auto:  # unattended end-to-end tests of the built exe; a format id ("7z") also picks that format
                 if auto in formats.BY_ID:
@@ -1410,14 +1488,21 @@ class Main(QMainWindow):
             o = dlg.options()
             out = o.pop("out_path")
         fmt = o.pop("fmt")
+        def create(prog, canc):
+            os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+            return formats.create(fmt, paths, out, progress=prog, cancel=canc, **o)
+
         ok, r = run_job(parent, f"압축하기 {os.path.basename(out)}",
-                        lambda p, c: formats.create(fmt, paths, out, progress=p, cancel=c, **o),
+                        create,
                         reveal=out, done_text="압축 작업을 완료했습니다.")
         if not ok:
             self._report(r)
-        elif not standalone:
-            self.status.showMessage("완료: " + ", ".join(os.path.basename(x) for x in r), 8000)
-            self.open_archive(r[0])
+        else:
+            if settings.get("compress_open_folder", False):
+                open_path(os.path.dirname(os.path.abspath(out)))
+            if not standalone:
+                self.status.showMessage("완료: " + ", ".join(os.path.basename(x) for x in r), 8000)
+                self.open_archive(r[0])
 
     def _editable(self) -> bool:
         """Adding / deleting rebuilds the archive with the ZIP writer, so only plain ZIP files qualify."""
@@ -1486,11 +1571,17 @@ class Main(QMainWindow):
     def extract(self):
         if not self.arc_path:
             return
-        names = self.selected_names()
+        names, from_search = self._extraction_scope()
+        if from_search and not names:
+            QMessageBox.information(self, APP, "검색 결과가 없습니다.")
+            return
         dlg = ExtractDialog(self, os.path.dirname(os.path.abspath(self.arc_path)), len(names))
+        if from_search:
+            dlg.sel_only.setText(f"검색 결과 {len(names):,}개 항목만")
         if dlg.exec() != QDialog.Accepted:
             return
-        mode = "skip" if dlg.mode_skip.isChecked() else "rename" if dlg.mode_ren.isChecked() else "overwrite"
+        mode = ("ask" if dlg.mode_ask.isChecked() else "skip" if dlg.mode_skip.isChecked()
+                else "rename" if dlg.mode_ren.isChecked() else "overwrite")
         dest = dlg.dest.text()
         if dlg.smart.isChecked():
             if not self._ensure_password():
@@ -1499,7 +1590,36 @@ class Main(QMainWindow):
                 dest = smart_dest(z, dest, self.arc_path)
         if self._do_extract(dest, names if dlg.sel_only.isChecked() else None, mode):
             self.status.showMessage(f"풀기 완료: {dest}", 8000)
-            open_path(dest)
+            if load_settings().get("extract_open_folder", False):
+                open_path(dest)
+
+    def _collision_mode(self, collisions):
+        """Ask on the GUI thread before any extraction worker is started."""
+        box = QMessageBox(QMessageBox.Question, APP,
+                          f"같은 이름의 대상 {len(collisions)}개가 있습니다.\n어떻게 처리할까요?",
+                          QMessageBox.Yes | QMessageBox.No | QMessageBox.Retry | QMessageBox.Cancel, self)
+        choices = {QMessageBox.Yes: "overwrite", QMessageBox.No: "skip", QMessageBox.Retry: "rename"}
+        for button, label in ((QMessageBox.Yes, "덮어쓰기"), (QMessageBox.No, "건너뛰기"),
+                              (QMessageBox.Retry, "이름변경"), (QMessageBox.Cancel, "취소")):
+            box.button(button).setText(label)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.setEscapeButton(QMessageBox.Cancel)
+        box.exec()
+        # Qt can recreate button widgets when applying style/font changes on show.
+        return choices.get(box.standardButton(box.clickedButton()))
+
+    def _extract_collisions(self, dest, names):
+        root = os.path.realpath(dest)
+        wanted = None if names is None else set(names)
+        collisions = []
+        with formats.open_any(self.arc_path, self.password) as archive:
+            for entry in archive.entries():
+                if wanted is not None and entry.name not in wanted:
+                    continue
+                target = ziplib.safe_target(root, entry.name)
+                if target is not None and os.path.lexists(target) and (not entry.is_dir or not os.path.isdir(target)):
+                    collisions.append(target)
+        return collisions
 
     def _do_extract(self, dest, names, mode) -> bool:
         if not self._ensure_password():
@@ -1507,10 +1627,29 @@ class Main(QMainWindow):
         while True:
             arc, pw = self.arc_path, self.password
 
+            if mode == "ask":
+                try:
+                    collisions = self._extract_collisions(dest, names)
+                except ziplib.BadPassword:
+                    pw2 = ask_password(self, arc, retry=True)
+                    if pw2 is None:
+                        return False
+                    self.password = pw2
+                    continue
+                except Exception as exc:
+                    log_exception(exc)
+                    self._report(("error", str(exc)))
+                    return False
+                chosen = self._collision_mode(collisions) if collisions else "overwrite"
+                if chosen is None:
+                    return False
+            else:
+                chosen = mode
+
             def job(prog, canc):
                 with formats.open_any(arc, pw) as z:
                     z.extract(dest, names, progress=prog, cancel=canc,
-                              overwrite="rename" if mode == "rename" else mode != "skip")
+                              overwrite="rename" if chosen == "rename" else chosen != "skip")
             ok, r = run_job(self, "압축 푸는 중...", job, reveal=dest, done_text="압축 풀기를 완료했습니다.")
             if ok:
                 return True
@@ -1666,6 +1805,10 @@ def _delete_tree(root, path: str):
 
 def shell_register():
     import winreg
+    settings = load_settings()
+    if not settings.get("shell_enabled", True):
+        shell_unregister()
+        return
     H = winreg.HKEY_CURRENT_USER
     for key in LEGACY_SHELL_KEYS:
         _delete_key_tree(key)
@@ -1678,9 +1821,18 @@ def shell_register():
         winreg.SetValueEx(k, "ArchiveExts", 0, winreg.REG_SZ,
                           ";".join(e for e in formats.READ_EXTS if e not in formats.IMAGE_EXTS))
         winreg.SetValueEx(k, "ImageExts", 0, winreg.REG_SZ, ";".join(formats.IMAGE_EXTS))
+        menu_mask = (int(settings.get("shell_compress", True)) |
+                     int(settings.get("shell_extract_here", True)) << 1 |
+                     int(settings.get("shell_extract_folder", True)) << 2)
+        winreg.SetValueEx(k, "MenuMask", 0, winreg.REG_DWORD, menu_mask)
+        winreg.SetValueEx(k, "Language", 0, winreg.REG_SZ, settings.get("language", "ko"))
+        winreg.SetValueEx(k, "SeparateArchives", 0, winreg.REG_DWORD,
+                          int(settings.get("shell_multi", "combined") == "separate"))
     dll_src = shell_dll_source()
     for key, label, flag in SHELL_VERBS:
-        if dll_src:
+        option = {"--archive": "shell_compress", "--extract-here": "shell_extract_here",
+                  "--extract-folder": "shell_extract_folder"}.get(flag)
+        if dll_src or (option and not settings.get(option, True)):
             # the shell extension shows these items: with the real names, and the extract ones in the menu's
             # extract section (a static verb always lands in the top group)
             _delete_key_tree(key)
@@ -1736,7 +1888,7 @@ def quick_extract(win: Main, arc: str, folder: bool, into: str | None = None):
     with z:
         if not folder:
             dest = smart_dest(z, dest, arc)
-    if win._do_extract(dest, None, "rename"):
+    if win._do_extract(dest, None, "rename") and load_settings().get("extract_open_folder", False):
         open_path(dest)
 
 
@@ -1902,6 +2054,8 @@ def gather_paths(verb: str, paths: list[str], first_wait_ms: int = 1500, quiet_m
 
 def _app():
     app = QApplication.instance() or QApplication(sys.argv)
+    appcore.apply_runtime_settings(strict=False)
+    appearance.apply_appearance(app)
     if os.path.exists(resource("yzip.ico")):
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(resource("yzip.ico")))
@@ -1921,6 +2075,8 @@ def attach_job(job) -> int:
             QMessageBox.warning(None, APP, "암호가 틀렸습니다.")
         elif kind != "cancel":
             QMessageBox.critical(None, APP, msg)
+    elif r and load_settings().get("compress_open_folder", False):
+        open_path(os.path.dirname(os.path.abspath(r[0])))
     return 0
 
 

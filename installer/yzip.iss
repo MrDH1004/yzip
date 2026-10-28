@@ -46,7 +46,7 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
 Name: "assoc"; Description: "압축 파일(.zip, .7z, .tar 등)을 yzip으로 열기"
-Name: "autoupdate"; Description: "업데이트 자동 확인 (하루 한 번 GitHub에 최신 버전 문의)"
+Name: "autoupdate"; Description: "업데이트 자동 확인 (앱을 실행할 때마다 GitHub에 최신 버전 문의)"
 Name: "desktopicon"; Description: "바탕 화면에 바로 가기 만들기"; Flags: unchecked
 
 [InstallDelete]

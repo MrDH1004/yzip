@@ -5,16 +5,25 @@ import sys
 
 
 def main() -> int:
+    import appcore
+    settings = appcore.apply_runtime_settings(strict=False)
     args = sys.argv[1:]
     job = None
     if args[:1] == ["--archive-list"] and len(args) >= 4 and args[2] == "--out":
-        import appcore
+        # Keep the selection available for elevation or GUI fallback.
+        with open(args[1], encoding="utf-8") as selection:
+            paths = [line.rstrip("\r") for line in selection.read().split("\n") if line.strip("\r")]
+        if not paths:
+            appcore.read_list(args[1])
+            return 0
+        targets = appcore.quick_targets(paths, args[3], settings, explicit_zip=True)
+        writable = all(appcore.can_write(os.path.dirname(os.path.abspath(out))) for _, out in targets)
         # a folder only administrators may write to (C:\): the same command as administrator, like Bandizip
         # (Windows asks in its UAC prompt); if that is refused, the GUI offers another place
-        if not appcore.can_write(os.path.dirname(os.path.abspath(args[3]))) and not os.environ.get(
+        if not writable and not os.environ.get(
                 "YZIP_AUTOACCEPT") and appcore.run_elevated(args):
             return 0
-        if appcore.can_write(os.path.dirname(os.path.abspath(args[3]))):
+        if writable:
             try:
                 paths = appcore.read_list(args[1])
                 if not paths:

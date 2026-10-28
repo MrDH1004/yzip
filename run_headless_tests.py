@@ -18,6 +18,8 @@ jobs = [("core unit tests", [sys.executable, "-W", "ignore", "-m", "unittest", "
         ("cli smoke", [sys.executable, "-W", "ignore", "smoke_test.py"]),
         ("right-click aggregation", [sys.executable, "-W", "ignore", "test_aggregation.py"])]
 jobs += [(f"gui: {g}", [sys.executable, "-W", "ignore", "test_gui_flows.py", g]) for g in GUI_GROUPS]
+jobs += [(f"preferences: {module}", [sys.executable, "-W", "ignore", "-m", "unittest", module])
+         for module in ("test_settings_core", "test_preferences", "test_settings_flows", "test_appearance", "test_shell_settings", "test_ui_renewal")]
 
 bad = 0
 for name, cmd in jobs:
@@ -30,7 +32,7 @@ for name, cmd in jobs:
     print(f"{status} {name}  (exit {r.returncode})")
     for l in fails:
         print("     " + l)
-    if status == "FAIL" and not fails:
-        print("     " + out[-600:].replace("\n", "\n     "))
+    if status == "FAIL":
+        print("     " + out[-3000:].replace("\n", "\n     "))
 print("\nALL PASSED" if not bad else f"\n{bad} suite(s) FAILED")
 sys.exit(1 if bad else 0)

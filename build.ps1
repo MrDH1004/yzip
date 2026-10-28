@@ -39,6 +39,7 @@ try {
         # --clean: a cached build\yzip\yzip.exe kept the old icon after yzip.ico changed.
         Run python @("-m", "PyInstaller", "--noconfirm", "--clean", "--onedir", "--windowed", "--name", "yzip",
             "--icon", "yzip.ico", "--version-file", "build\version_info.txt", "--add-data", "yzip.ico;.",
+            "--add-data", "LICENSE;.",
             "--add-binary", "shell\build\yzipshell.dll;.", "--add-binary", "tools\7z.exe;tools",
             "--add-binary", "tools\7z.dll;tools", "--add-binary", "tools\libarchive.dll;tools",
             "--add-binary", "tools\yzip_native.dll;tools", "--add-binary", "tools\zpaq.exe;tools",

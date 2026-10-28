@@ -13,6 +13,7 @@ import functools
 import hashlib
 import lzma
 import os
+import runtimeconfig
 import struct
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +27,7 @@ def plan(preset: int, total: int) -> tuple[int, int]:
     dictionary), and blocks between 1x and 4x the dictionary (7-Zip's default is 4x), small enough that each
     thread gets ~3 blocks: with one block per thread the last, slowest block leaves the other cores idle."""
     d = _DICT[preset]
-    cpu = os.cpu_count() or 2
+    cpu = runtimeconfig.worker_count()
     workers = max(1, min(cpu, _MEM_BUDGET // (d * 15)))
     block = max(1 << 20, min(4 * d, max(d, -(-total // (workers * 3)))))
     return block, workers
@@ -250,7 +251,7 @@ class XZReader:
     def __init__(self, path: str, blocks):
         self.f = open(path, "rb")
         self.blocks = collections.deque(blocks)
-        self.workers = os.cpu_count() or 2
+        self.workers = runtimeconfig.worker_count()
         self.pool = ThreadPoolExecutor(self.workers)
         self.pending: collections.deque = collections.deque()
         self.held = 0
@@ -489,7 +490,7 @@ class _Sink:
 def fast_extract(path: str, folders: list[dict], password, open_out, counter) -> None:
     """Decode folders from fast_plan. open_out(file_info) returns a writable object (close() is called) or
     None to skip that member; LZMA2 pieces that start with a dictionary reset decode in parallel."""
-    workers = os.cpu_count() or 2
+    workers = runtimeconfig.worker_count()
     pool = ThreadPoolExecutor(workers)
     try:
         with open(path, "rb") as f:

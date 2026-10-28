@@ -300,6 +300,7 @@ def make_zip(t, with_pw=None):
 
 
 def test_extract_verbs():
+    gui.save_setting("extract_open_folder", True)
     t = fresh()
     d, files, z = make_zip(t)
     run_main(["--extract-here", z])
@@ -493,9 +494,9 @@ def test_simple_window():
           w.pages.currentIndex() == 0 and not w.toolbar.isVisible() and not w.a_extract.isEnabled(),
           (w.pages.currentIndex(), w.toolbar.isVisible()))
     check("simple: home page exposes 환경설정", w.settings_btn.text().strip() == "환경설정", w.settings_btn.text())
-    check("simple: main window title and home footer show the version",
-          w.windowTitle() == f"yzip {gui.__version__}" and f"yzip {gui.__version__}" in w.findChild(QLabel, "homeFoot").text(),
-          (w.windowTitle(), w.findChild(QLabel, "homeFoot").text()))
+    check("simple: main window title and home version show the version",
+          w.windowTitle() == f"yzip {gui.__version__}" and w.findChild(QLabel, "homeVersion").text() == f"yzip {gui.__version__}",
+          (w.windowTitle(), w.findChild(QLabel, "homeVersion").text()))
     w.open_archive(z)
     app.processEvents()
     shown = [a.text() for a in w.toolbar.actions() if a.isVisible() and a.text()]
@@ -542,7 +543,7 @@ def test_simple_window():
     check("simple: shortcuts kept although the actions are hidden", {"Ctrl+E", "Ctrl+O", "Ctrl+N", "Del", "Ctrl+T"} <= keys, keys)
     dlg = gui.ExtractDialog(w, t, 0)
     check("simple: extract dialog folds overwrite/smart options, hides 'selected only' with no selection",
-          not dlg.mode_over.isVisibleTo(dlg) and not dlg.sel_only.isVisibleTo(dlg) and dlg.mode_over.isChecked()
+          not dlg.mode_over.isVisibleTo(dlg) and not dlg.sel_only.isVisibleTo(dlg) and dlg.mode_ask.isChecked()
           and dlg.smart.isChecked(), "")
     dlg.more.setChecked(True)
     check("simple: 옵션 더 보기 reveals them", dlg.mode_over.isVisibleTo(dlg) and dlg.smart.isVisibleTo(dlg), "")
@@ -556,19 +557,20 @@ def test_settings():
     import assoc
     calls = []
     with mock.patch.object(assoc, "enabled", return_value=False), \
-            mock.patch.object(assoc, "register", side_effect=lambda: calls.append("register")), \
-            mock.patch.object(assoc, "unregister", side_effect=lambda: calls.append("unregister")):
+            mock.patch.object(assoc, "register", side_effect=lambda exts: calls.append(("register", set(exts)))), \
+            mock.patch.object(assoc, "unregister", side_effect=lambda exts: calls.append(("unregister", set(exts)))):
         dlg = gui.SettingsDialog(None)
         check("settings: file association starts unchecked when yzip is not registered",
-              not dlg.assoc_check.isChecked(), dlg.assoc_check.isChecked())
-        dlg.assoc_check.setChecked(True)
+              all(item.checkState(0) == gui.Qt.Unchecked for item in dlg._association_items.values()),
+              [ext for ext, item in dlg._association_items.items() if item.checkState(0) == gui.Qt.Checked])
+        dlg._select_associations(True)
         dlg.apply()
         check("settings: enabling file association registers all supported types",
-              calls == ["register"], calls)
-        dlg.assoc_check.setChecked(False)
+              calls == [("register", set(assoc.TYPES))], calls)
+        dlg._select_associations(False)
         dlg.apply()
         check("settings: disabling file association unregisters all supported types",
-              calls == ["register", "unregister"], calls)
+              calls == [("register", set(assoc.TYPES)), ("unregister", set(assoc.TYPES))], calls)
         check("settings: automatic update starts enabled",
               dlg.auto_update_check.isChecked(), dlg.auto_update_check.isChecked())
         dlg.auto_update_check.setChecked(False)

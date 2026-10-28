@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import runtimeconfig
 import re
 import shutil
 import struct
@@ -372,7 +373,7 @@ class Archive:
 
         # names that differ only in case land on the same Windows file: keep the last, never write it twice at once
         jobs = list({t.lower(): (n, i, t) for n, i, t in jobs}.values())
-        workers = max(1, min(os.cpu_count() or 2, 8, len(jobs)))
+        workers = max(1, min(runtimeconfig.worker_count(8), len(jobs)))
         try:
             with ThreadPoolExecutor(workers) as pool:
                 futures = [pool.submit(one, j) for j in jobs]

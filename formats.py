@@ -12,6 +12,7 @@ import bz2
 import gzip
 import lzma
 import os
+import runtimeconfig
 import re
 import tarfile
 import time
@@ -774,7 +775,7 @@ def _zstd_options(level: int):
     lv = max(1, round(1 + (level - 1) * 18 / 8))  # 1..9 -> zstd 1..19
     return {zstd.CompressionParameter.compression_level: lv,
             zstd.CompressionParameter.checksum_flag: 1,  # without it no reader can detect damaged data
-            zstd.CompressionParameter.nb_workers: min(os.cpu_count() or 2, 16)}
+            zstd.CompressionParameter.nb_workers: runtimeconfig.worker_count(16)}
 
 
 def create(fmt_id: str, paths: Iterable[str], out_path: str, level: int = 6, password: Optional[str] = None,

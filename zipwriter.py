@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import runtimeconfig
 import struct
 import time
 import zlib
@@ -186,7 +187,7 @@ def write_zip(items, out_path: str, level: int = 6, store_only: bool = False,
     items = list(items)
     total = sum(os.path.getsize(p) for p, n in items if not n.endswith("/"))
     method = 0 if store_only else 8
-    workers = workers or min(os.cpu_count() or 2, 16)
+    workers = min(workers, runtimeconfig.worker_count()) if workers else runtimeconfig.worker_count(16)
     window = workers * 2
     done = 0
     entries: list[_Entry] = []
