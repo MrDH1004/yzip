@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import bz2
 import gzip
+import io
 import lzma
 import os
 import runtimeconfig
 import re
 import tarfile
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
@@ -254,6 +257,11 @@ def is_zip(path: str) -> bool:
 
 
 # ---------- shared extraction helpers ----------
+
+# Reserve from one extraction-wide budget, rather than buffering every member.
+_SEVEN_FILE_LIMIT = 256 << 10
+_SEVEN_MEMORY_LIMIT = 16 << 20
+
 
 class _Planner:
     """Maps archive names to safe targets under dest (no traversal) and applies the overwrite policy:
@@ -645,16 +653,49 @@ class SevenZArchive(_Base):
             by_name.setdefault(fi.filename, []).append(k)
         counter = _Counter(sum(fi.uncompressed or 0 for _, fi in targets.values()), progress, cancel)
         opened: dict[int, object] = {}
+        memory_used = 0
+        memory_lock = threading.Lock()
 
         class Out(Py7zIO):
-            def __init__(self, name, path):
+            def __init__(self, name, path, expected):
+                nonlocal memory_used
                 self.name, self.path = name, path
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 self.part = ziplib.part_path(path)  # moved over the target only when the whole archive succeeded
-                self.f = open(self.part, "w+b")
+                self.reserved = 0
+                self.memory = False
+                with memory_lock:
+                    if 0 <= expected <= _SEVEN_FILE_LIMIT and memory_used + expected <= _SEVEN_MEMORY_LIMIT:
+                        self.memory = True
+                        self.reserved = expected
+                        memory_used += expected
+                self.f = io.BytesIO() if self.memory else open(self.part, "w+b")
                 self.n = 0
 
+            def release(self):
+                nonlocal memory_used
+                with memory_lock:
+                    memory_used -= self.reserved
+                    self.reserved = 0
+
+            def spill(self):
+                # Preserve random access, including sparse writes from a fallback
+                # decoder; never trust the header to bound actual output.
+                memory = self.f
+                position = memory.tell()
+                self.f = open(self.part, "w+b")
+                self.memory = False
+                try:
+                    with memory.getbuffer() as data:
+                        self.f.write(data)
+                    self.f.seek(position)
+                finally:
+                    memory.close()
+                    self.release()
+
             def write(self, s):
+                if self.memory and self.f.tell() + len(s) > self.reserved:
+                    self.spill()
                 self.f.write(s)
                 self.n += len(s)
                 counter.add(len(s), self.name)
@@ -673,14 +714,37 @@ class SevenZArchive(_Base):
                 return self.n
 
             def close(self):
-                if not self.f.closed:
+                # Both decoders close members before the final CRC is checked.
+                # Retain bounded memory here; publish only after _run returns.
+                if not self.memory and not self.f.closed:
                     self.f.close()
+
+            def dispose(self):
+                try:
+                    self.f.close()
+                finally:
+                    self.release()
+
+            def commit(self):
+                if self.memory:
+                    with self.f.getbuffer() as data:
+                        with open(self.part, "wb") as dst:
+                            dst.write(data)
+                else:
+                    self.close()
+                if cancel and cancel():
+                    raise Cancelled()
+                ziplib.finish_part(self.part, self.path)
+                self.dispose()
 
         def make(k):
             old = opened.pop(k, None)
             if old is not None:
-                old.close()
-            w = opened[k] = Out(targets[k][1].filename, targets[k][0])
+                old.dispose()
+                if os.path.exists(old.part):
+                    os.remove(old.part)
+            t, fi = targets[k]
+            w = opened[k] = Out(fi.filename, t, fi.uncompressed or 0)
             return w
 
         class Factory(WriterFactory):
@@ -704,19 +768,47 @@ class SevenZArchive(_Base):
                                     lambda fi: make(pos[fi.id]) if pos.get(fi.id) in targets else None, _NoCount())
         try:
             self._run(go)
+            # Different paths can flush/replace concurrently. A repeated target
+            # stays in one ordered group so the last archive member still wins.
+            groups = {}
             for k, (t, fi) in targets.items():
-                w = opened.get(k)
-                if w is None:  # empty members get no writer
-                    open(t, "wb").close()
-                else:
-                    w.close()
-                    ziplib.finish_part(w.part, t)
-                    del opened[k]
-        except BaseException:
-            for w in opened.values():  # never leave half-written files behind; existing files stay as they were
-                w.close()
-                if os.path.exists(w.part):
-                    os.remove(w.part)
+                w = opened[k] if k in opened else make(k)  # empty members may have no writer
+                groups.setdefault(t.lower(), []).append(w)
+            stop = threading.Event()
+
+            def commit_group(writers):
+                try:
+                    for w in writers:
+                        if stop.is_set():
+                            return
+                        if cancel and cancel():
+                            raise Cancelled()
+                        w.commit()
+                except BaseException:
+                    stop.set()
+                    raise
+
+            workers = min(4, runtimeconfig.worker_count(), len(groups))
+            if workers == 1:
+                for writers in groups.values():
+                    commit_group(writers)
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    for _ in pool.map(commit_group, groups.values()):
+                        pass
+        except BaseException as exc:
+            # Workers have all stopped before cleanup. Preserve the original
+            # error and try every part even if one close/remove also fails.
+            for w in opened.values():
+                try:
+                    w.dispose()
+                except OSError as cleanup_error:
+                    exc.add_note(f"Could not close {w.part}: {cleanup_error}")
+                try:
+                    if os.path.exists(w.part):
+                        os.remove(w.part)
+                except OSError as cleanup_error:
+                    exc.add_note(f"Could not remove {w.part}: {cleanup_error}")
             raise
         for k, (t, fi) in targets.items():
             if fi.creationtime:

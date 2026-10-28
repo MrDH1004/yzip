@@ -72,7 +72,10 @@ def _raw_lzma2(preset):
     filters = _filters(preset)
 
     def go(data):
-        c = lzma.compress(data, lzma.FORMAT_RAW, filters=filters)
+        # Independent blocks cannot refer back beyond their own input. Avoid
+        # reserving a preset-sized match finder for each small parallel job.
+        bounded = [dict(filters[0], dict_size=min(_DICT[preset], max(len(data), 1 << 12)))]
+        c = lzma.compress(data, lzma.FORMAT_RAW, filters=bounded)
         assert c[-1] == 0
         return c[:-1]
     return go
@@ -400,14 +403,14 @@ class _Buf:
     def __init__(self, read):
         self.src, self.buf, self.pos = read, b"", 0
 
-    def take(self, n: int) -> bytes:
+    def take(self, n: int) -> memoryview:
         while len(self.buf) - self.pos < n:
             more = self.src(max(1 << 20, n))
             if not more:
                 raise ValueError("7z data ends early")
             self.buf = self.buf[self.pos:] + more
             self.pos = 0
-        b = self.buf[self.pos:self.pos + n]
+        b = memoryview(self.buf)[self.pos:self.pos + n]
         self.pos += n
         return b
 
@@ -423,11 +426,11 @@ def _segments(src: _Buf):
         if c in (1, 2):
             h = src.take(2)
             n = (h[0] << 8 | h[1]) + 1
-            chunk, un = bytes([c]) + h + src.take(n), n
+            chunk, un = (bytes([c]), h, src.take(n)), n
         elif c >= 0x80:
             h = src.take(5 if c >= 0xC0 else 4)
             un = ((c & 0x1F) << 16 | h[0] << 8 | h[1]) + 1
-            chunk = bytes([c]) + h + src.take((h[2] << 8 | h[3]) + 1)
+            chunk = (bytes([c]), h, src.take((h[2] << 8 | h[3]) + 1))
         else:
             raise ValueError("corrupt LZMA2 data")
         if c >= 0xE0 and cur:
@@ -436,7 +439,7 @@ def _segments(src: _Buf):
         elif usize >= _SEG_CAP:
             yield b"".join(cur), usize, fresh, False
             cur, usize, fresh = [], 0, False
-        cur.append(chunk)
+        cur.extend(chunk)
         usize += un
     if cur:
         yield b"".join(cur), usize, fresh, True
@@ -637,8 +640,8 @@ def write_7z(out_path: str, items, preset: int, store_only: bool, password, coun
         is_dir = n.endswith("/")
         entries.append((n.rstrip("/"), is_dir, st.st_mtime, 0x10 if is_dir else 0x20, not is_dir and st.st_size > 0))
         if not is_dir and st.st_size > 0:
-            streams.append((p, n))
-    total = sum(os.path.getsize(p) for p, _ in streams)
+            streams.append((p, n, st.st_size))
+    total = sum(size for _, _, size in streams)
     key = aes_key(password) if password else None
     sizes, crcs = [], []
     with open(out_path, "wb") as f:
@@ -656,10 +659,13 @@ def write_7z(out_path: str, items, preset: int, store_only: bool, password, coun
 
         def blocks(size):
             buf = bytearray()
-            for p, n in streams:
+            for p, n, size_hint in streams:
                 crc, got = 0, 0
+                # BufferedReader allocates for the requested size even on a short read.
+                # Keep tiny files from repeatedly allocating a megabyte, including at EOF.
+                read_size = min(1 << 20, size_hint)
                 with open(p, "rb") as src:
-                    while chunk := src.read(1 << 20):
+                    while chunk := src.read(read_size):
                         crc, got = zlib.crc32(chunk, crc), got + len(chunk)
                         buf += chunk
                         counter.add(len(chunk), n)
@@ -679,6 +685,10 @@ def write_7z(out_path: str, items, preset: int, store_only: bool, password, coun
                 coders.append((_ID_COPY, b""))
             else:
                 block, workers = plan(preset, total)
+                if workers > 1 and len(streams) >= 32 and total <= len(streams) * (64 << 10):
+                    # A dictionary-sized minimum gives a small-file tree only one or
+                    # two jobs. Use smaller independent blocks to keep cores occupied.
+                    block = min(block, max(1 << 20, -(-total // (workers * 3))))
                 jobs = _Ordered(_raw_lzma2(preset), workers)
                 try:
                     for b in blocks(block):

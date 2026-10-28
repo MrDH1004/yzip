@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QBoxLayout, QCheckBox, QComboBox, Q
 
 import formats
 import ziplib
+import ziprepair
 import appcore
 import appearance
 from preferences import PreferencesDialog as SettingsDialog
@@ -985,6 +986,7 @@ class Main(QMainWindow):
         for a in self.archive_acts:
             a.setEnabled(has_archive)
         self.a_extract.setEnabled(has_archive and bool(self._extraction_scope()[0] or not self.search.text().strip()))
+        self.a_repair.setEnabled(has_archive and bool(self.arc_path) and formats.is_zip(self.arc_path))
         self.status.setVisible(has_archive)
         if not has_archive:
             self.status.showMessage("")
@@ -1008,10 +1010,11 @@ class Main(QMainWindow):
         self.a_add = self._act("파일 추가…", self.add_files, "Ctrl+Shift+A", G_ADD)
         self.a_delete = self._act("선택 항목 삭제", self.delete_selected, "Del", G_DELETE)
         self.a_test = self._act("압축 파일 검사", self.test, "Ctrl+T", G_TEST)
+        self.a_repair = self._act("손상된 ZIP 복구…", self.repair_archive)
         self.a_details = self._act("자세한 정보 보기", lambda on: self._show_details(on, save=True))
         self.a_details.setCheckable(True)
         self.a_up = self._act("상위 폴더", self.go_up, "Backspace")
-        self.archive_acts = [self.a_extract, self.a_add, self.a_delete, self.a_test]
+        self.archive_acts = [self.a_extract, self.a_add, self.a_delete, self.a_test, self.a_repair]
 
         tb = self.toolbar = QToolBar("main")
         tb.setMovable(False)
@@ -1028,7 +1031,7 @@ class Main(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
         more = QMenu(self)
-        for a in (self.a_add, self.a_delete, self.a_test):
+        for a in (self.a_add, self.a_delete, self.a_test, self.a_repair):
             more.addAction(a)
         more.addSeparator()
         more.addAction(self.a_details)
@@ -1234,7 +1237,19 @@ class Main(QMainWindow):
         try:
             a, pw = self._open(path, None)
         except Exception as e:
-            QMessageBox.critical(self, APP, f"열 수 없습니다: {e}")
+            candidate = False
+            if os.path.isfile(path) and os.path.splitext(path)[1].lower() == ".zip":
+                try:
+                    with open(path, "rb") as file:
+                        candidate = file.read(4) == b"PK\x03\x04"
+                except OSError:
+                    pass
+            if candidate and QMessageBox.question(
+                    self, APP, f"ZIP 파일을 정상적으로 열 수 없습니다.\n{e}\n\n복구를 시도할까요?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes:
+                self.repair_archive(path)
+            else:
+                QMessageBox.critical(self, APP, f"열 수 없습니다: {e}")
             return False
         if a is None:
             return False
@@ -1661,6 +1676,43 @@ class Main(QMainWindow):
                 continue
             self._report(r)
             return False
+
+    def repair_archive(self, path: str | None = None):
+        arc = path or self.arc_path
+        if not arc:
+            arc, _ = QFileDialog.getOpenFileName(self, "복구할 ZIP 선택", "", "ZIP (*.zip)")
+            if not arc:
+                return
+        if os.path.splitext(arc)[1].lower() != ".zip":
+            QMessageBox.information(self, APP, "현재 복구 기능은 ZIP 형식만 지원합니다.")
+            return
+        base, _ = os.path.splitext(os.path.abspath(arc))
+        default = unique_path(base + "_recovered.zip")
+        out, _ = QFileDialog.getSaveFileName(self, "복구 ZIP 저장", default, "ZIP (*.zip)")
+        if not out:
+            return
+        if os.path.realpath(arc) == os.path.realpath(out):
+            QMessageBox.warning(self, APP, "원본 ZIP과 다른 이름으로 저장해 주세요.")
+            return
+
+        def job(prog, canc):
+            return ziprepair.repair_zip(arc, out, progress=prog, cancel=canc)
+
+        ok, result = run_job(self, "손상된 ZIP 복구 중...", job, reveal=out,
+                             done_text="ZIP 복구를 완료했습니다.")
+        if not ok:
+            self._report(result)
+            return
+        if not result.output:
+            QMessageBox.warning(self, APP, "복구 가능한 정상 파일을 찾지 못했습니다.")
+            return
+        message = f"{len(result.recovered):,}개 파일을 복구했습니다."
+        if result.skipped:
+            message += f"\n{len(result.skipped):,}개 항목은 손상되었거나 지원하지 않아 건너뛰었습니다."
+            details = "\n".join(f"• {item.name}: {item.reason}" for item in result.skipped[:10])
+            if details:
+                message += "\n\n" + details
+        QMessageBox.information(self, APP, message)
 
     def test(self):
         if not self.arc_path or not self._ensure_password():

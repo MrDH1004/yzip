@@ -61,11 +61,25 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           YZIP_NO_UPDATE: "1"
-        run: python -W ignore -m unittest test_ziplib test_zipwriter test_formats test_nativearchive test_moreformats test_updater
+        run: python -W ignore -m unittest test_ziprepair test_ziplib test_zipwriter test_formats test_nativearchive test_moreformats test_updater
+
+      - name: Preferences tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          YZIP_NO_UPDATE: "1"
+        run: |
+          foreach ($suite in @('test_settings_core', 'test_preferences', 'test_settings_flows', 'test_appearance', 'test_shell_settings', 'test_ui_renewal')) {
+            python -W ignore -m unittest $suite
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
 
       - name: Build app (shell extension + exe)
         shell: powershell
         run: .\build.ps1 -Stage app
+
+      - name: Native menu preferences tests
+        shell: powershell
+        run: .\test_shell_native.ps1
 
       - name: Upload unsigned app artifact
         id: upload-app
@@ -133,8 +147,9 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $tags = @(gh release list --limit 100 --json tagName --jq '.[].tagName')
           if ($tags -notcontains $tag) {
-            # every release page states that the current artifact is unsigned
-            gh release create $tag --title "yzip $v" --notes-file .github\release-signing.md --generate-notes
+            $notes = ".github\release-notes-$v.md"
+            if (-not (Test-Path $notes)) { $notes = '.github\release-signing.md' }
+            gh release create $tag --title "yzip $v" --notes-file $notes --generate-notes
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           gh release upload $tag "dist\$name" "dist\$name.sha256" --clobber

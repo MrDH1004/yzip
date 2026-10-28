@@ -145,6 +145,20 @@ def _deflate(data: bytes, level: int) -> bytes:
     return c.compress(data) + c.flush(zlib.Z_SYNC_FLUSH)
 
 
+def _small_file(path: str, level: int, method: int):
+    """Overlap small-file opens/reads as well as deflate, with a bounded buffer.
+
+    A growing source must never be silently truncated to the small-file limit.
+    The caller's transactional output handling will discard a failed archive.
+    """
+    with open(path, "rb") as src:
+        data = src.read(CHUNK + 1)
+    if len(data) > CHUNK:
+        raise OSError(f"Source grew beyond the queued small-file limit: {path}")
+    blob = _deflate(data, level) if method == 8 and data else data
+    return blob, zlib.crc32(data), len(data)
+
+
 def _local_header(e: _Entry, size_hint: int) -> bytes:
     ver = 51 if e.aes else (45 if e.zip64 else 20)
     extra = (struct.pack("<HHQQ", 1, 16, size_hint, 0) if e.zip64 else b"") + e.aes_extra()
@@ -184,8 +198,12 @@ def write_zip(items, out_path: str, level: int = 6, store_only: bool = False,
         from Cryptodome.Cipher import AES
         from Cryptodome.Util import Counter
     pw = password.encode("utf-8") if password else None
-    items = list(items)
-    total = sum(os.path.getsize(p) for p, n in items if not n.endswith("/"))
+    metadata = []
+    for path, name in items:
+        if cancel and cancel():
+            raise Cancelled()
+        metadata.append((path, name, os.stat(path)))
+    total = sum(st.st_size for _, name, st in metadata if not name.endswith("/"))
     method = 0 if store_only else 8
     workers = min(workers, runtimeconfig.worker_count()) if workers else runtimeconfig.worker_count(16)
     window = workers * 2
@@ -195,7 +213,10 @@ def write_zip(items, out_path: str, level: int = 6, store_only: bool = False,
 
     with open(out_path, "wb", buffering=1 << 20) as out, ThreadPoolExecutor(workers) as pool:
         def drain(limit: int):
+            nonlocal done
             while len(pending) > limit:
+                if cancel and cancel():
+                    raise Cancelled()
                 kind, *rest = pending.popleft()
                 if kind == "hdr":
                     e, size = rest
@@ -208,9 +229,15 @@ def write_zip(items, out_path: str, level: int = 6, store_only: bool = False,
                         e.csize += len(salt) + len(verifier)
                         e.cipher = AES.new(key, AES.MODE_CTR, counter=Counter.new(128, initial_value=1, little_endian=True))
                         e.mac = hmac.new(mac_key, digestmod=hashlib.sha1)
-                elif kind == "data":
-                    e, fut = rest
-                    blob = fut.result()
+                elif kind in ("data", "small"):
+                    e, fut = rest[:2]
+                    if kind == "small":
+                        blob, e.crc, e.usize = fut.result()
+                        done += e.usize
+                        if progress:
+                            progress(done, total, rest[2])
+                    else:
+                        blob = fut.result()
                     if e.aes:
                         blob = e.cipher.encrypt(blob)
                         e.mac.update(blob)
@@ -241,12 +268,12 @@ def write_zip(items, out_path: str, level: int = 6, store_only: bool = False,
                         c = _Copied(info, name)
                         _copy_entry(src, out, c)
                         entries.append(c)
-            for path, name in items:
+            for path, name, st in metadata:
                 if cancel and cancel():
                     raise Cancelled()
                 is_dir = name.endswith("/")
-                size = 0 if is_dir else os.path.getsize(path)
-                e = _Entry(name, os.path.getmtime(path), is_dir, size, method, aes=bool(pw))
+                size = 0 if is_dir else st.st_size
+                e = _Entry(name, st.st_mtime, is_dir, size, method, aes=bool(pw))
                 if e.aes:  # key derivation (PBKDF2) runs on the pool while earlier data is still being written
                     e.keys = pool.submit(_derive, pw, os.urandom(AES_SALT))
                 if is_dir:
@@ -254,6 +281,11 @@ def write_zip(items, out_path: str, level: int = 6, store_only: bool = False,
                     drain(window)
                     continue
                 pending.append(("hdr", e, size))
+                if size <= CHUNK:
+                    pending.append(("small", e, pool.submit(_small_file, path, level, method), name))
+                    pending.append(("end", e))
+                    drain(window)
+                    continue
                 with open(path, "rb") as src:
                     while True:
                         data = src.read(CHUNK)

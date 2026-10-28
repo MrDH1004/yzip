@@ -231,6 +231,41 @@ class RenewalTests(unittest.TestCase):
         self.assertEqual(self.win.selected_names(), [])
         self.assertFalse(self.win.a_extract.isEnabled())
 
+    def test_zip_repair_action_uses_separate_default_output_and_reports_result(self):
+        self.win.open_archive(str(self.arc))
+        self.assertTrue(hasattr(self.win, "a_repair"))
+        self.assertTrue(self.win.a_repair.isEnabled())
+        expected = self.root / "review_recovered.zip"
+
+        def immediate(_parent, _title, fn, **_kwargs):
+            return True, fn(lambda *_args: None, lambda: False)
+
+        result = mock.Mock(output=str(expected), recovered=("Alpha.txt", "Beta.txt"), skipped=())
+        with mock.patch.object(gui.QFileDialog, "getSaveFileName", return_value=(str(expected), "ZIP (*.zip)")) as save, \
+                mock.patch.object(gui, "run_job", side_effect=immediate), \
+                mock.patch.object(gui.ziprepair, "repair_zip", return_value=result) as repair, \
+                mock.patch.object(gui.QMessageBox, "information") as info:
+            self.win.repair_archive()
+
+        self.assertEqual(Path(save.call_args.args[2]), expected)
+        repair.assert_called_once()
+        self.assertEqual(repair.call_args.args[:2], (str(self.arc), str(expected)))
+        self.assertIn("2", info.call_args.args[2])
+
+    def test_opening_zip_with_missing_central_directory_offers_repair(self):
+        damaged = self.root / "broken.zip"
+        damaged.write_bytes(self.arc.read_bytes().split(b"PK\x01\x02", 1)[0])
+
+        with mock.patch.object(gui.QMessageBox, "question", return_value=gui.QMessageBox.Yes) as question, \
+                mock.patch.object(self.win, "repair_archive") as repair, \
+                mock.patch.object(gui.QMessageBox, "critical") as critical:
+            opened = self.win.open_archive(str(damaged))
+
+        self.assertFalse(opened)
+        question.assert_called_once()
+        repair.assert_called_once_with(str(damaged))
+        critical.assert_not_called()
+
     def test_support_details_opens_association_tab(self):
         dlg = mock.Mock()
         dlg.exec.return_value = QDialog.Rejected

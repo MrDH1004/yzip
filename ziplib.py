@@ -17,7 +17,7 @@ from typing import Callable, Iterable, Optional
 
 import zipwriter
 
-pyzipper = None  # imported by Archive on first use
+pyzipper = None  # imported only for encrypted archives
 
 Progress = Callable[[int, int, str], None]  # done_bytes, total_bytes, current_name
 
@@ -172,11 +172,23 @@ class Archive:
         if is_split_first(path):
             real = self._tmp = join_split(path)
         self._real = real
-        global pyzipper
-        import pyzipper  # ~75 ms (Cryptodome, cffi): only reading needs it, not the right-click compress path
         try:
-            self.zf = pyzipper.AESZipFile(real)
+            # Listing plain ZIPs must not load Cryptodome/cffi on every CLI run.
+            # The standard reader also handles non-deflate methods without AES.
+            self.zf = zipfile.ZipFile(real)
+            self._reader = zipfile.ZipFile
+            self._bad_zip = zipfile.BadZipFile
+            if any(info.flag_bits & 1 for info in self.zf.infolist()):
+                self.zf.close()
+                global pyzipper
+                import pyzipper
+                self.zf = pyzipper.AESZipFile(real)
+                self._reader = pyzipper.AESZipFile
+                self._bad_zip = pyzipper.BadZipFile
         except BaseException:
+            reader = getattr(self, "zf", None)
+            if reader is not None:
+                reader.close()
             if self._tmp:
                 os.remove(self._tmp)
             raise
@@ -215,7 +227,7 @@ class Archive:
                 with self.zf.open(probe) as f:
                     f.read()  # CRC / HMAC check fails on a wrong key
                 return
-            except (RuntimeError, zipfile.BadZipFile, pyzipper.BadZipFile):
+            except (RuntimeError, zipfile.BadZipFile, self._bad_zip):
                 continue
         self.zf.setpassword(candidates[0])
 
@@ -255,6 +267,8 @@ class Archive:
                 i += 1
             return f"{base} ({i}){ext}"
         for n in sel:
+            if cancel and cancel():
+                raise Cancelled()
             info = self._names[n]
             target = safe_target(root, n)
             if target is None:
@@ -279,7 +293,7 @@ class Archive:
         def handle():  # one zip handle per worker thread; handles are not thread-safe
             z = getattr(local, "z", None)
             if z is None:
-                z = local.z = pyzipper.AESZipFile(self._real)
+                z = local.z = self._reader(self._real)
                 z.setpassword(pwd)
                 with lock:
                     handles.append(z)
@@ -344,7 +358,6 @@ class Archive:
                 return
             if cancel and cancel():
                 raise Cancelled()
-            os.makedirs(os.path.dirname(target), exist_ok=True)
             part = part_path(target)  # an existing file is replaced only once the new one is complete
             try:
                 with open(part, "wb") as dst:
@@ -361,7 +374,7 @@ class Archive:
             except BaseException as e:
                 if os.path.exists(part):
                     os.remove(part)
-                if isinstance(e, (RuntimeError, zipfile.BadZipFile, pyzipper.BadZipFile)) and info.flag_bits & 1 \
+                if isinstance(e, (RuntimeError, zipfile.BadZipFile, self._bad_zip)) and info.flag_bits & 1 \
                         and ("password" in str(e).lower() or "Bad" in str(e)):
                     raise BadPassword(str(e))  # only an encrypted member can fail because of the password
                 raise
@@ -373,6 +386,13 @@ class Archive:
 
         # names that differ only in case land on the same Windows file: keep the last, never write it twice at once
         jobs = list({t.lower(): (n, i, t) for n, i, t in jobs}.values())
+        # Prepare shared parents once rather than issuing mkdir/stat/exists for
+        # every small file. safe_target above still resolves every member path.
+        parents = dict.fromkeys(os.path.dirname(t) for _, _, t in jobs)
+        for parent in parents:
+            if cancel and cancel():
+                raise Cancelled()
+            os.makedirs(parent, exist_ok=True)
         workers = max(1, min(runtimeconfig.worker_count(8), len(jobs)))
         try:
             with ThreadPoolExecutor(workers) as pool:
@@ -411,7 +431,7 @@ class Archive:
                 if "password" in str(e).lower():
                     raise BadPassword(str(e))
                 bad.append(n)
-            except (zipfile.BadZipFile, pyzipper.BadZipFile, EOFError, OSError):
+            except (zipfile.BadZipFile, self._bad_zip, EOFError, OSError):
                 bad.append(n)
         return bad
 
