@@ -12,7 +12,7 @@ python benchmark_native.py --runs 7 `
   --summary .omc\artifacts\native-performance-baseline\latest-summary.json
 ```
 
-Normal runs automatically use the committed `docs\performance\native-benchmark-baseline.json` regression baseline. `--regression-baseline` is only needed to select another existing baseline. A summary path that resolves to the selected baseline is rejected before the matrix starts.
+Normal runs automatically use the committed `docs\performance\native-benchmark-baseline.json` regression baseline. `--regression-baseline` is only needed to select another existing baseline. Resolved output, summary, and selected baseline paths must all be distinct; collisions are rejected before the matrix starts.
 
 Creating or intentionally replacing a baseline is a separate explicit mode:
 

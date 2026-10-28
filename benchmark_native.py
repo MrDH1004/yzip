@@ -402,8 +402,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         baseline_path = args.regression_baseline or DEFAULT_BASELINE
         if not baseline_path.is_file():
             parser.error(f"regression baseline not found: {baseline_path}")
-        if args.summary and args.summary.resolve() == baseline_path.resolve():
-            parser.error("--summary must not overwrite the regression baseline")
+    output_resolved = args.output.resolve()
+    summary_resolved = args.summary.resolve() if args.summary else None
+    baseline_resolved = baseline_path.resolve() if baseline_path else None
+    if summary_resolved and output_resolved == summary_resolved:
+        parser.error("--output and --summary must use different paths")
+    if baseline_resolved and output_resolved == baseline_resolved:
+        parser.error("--output must not overwrite the regression baseline")
+    if baseline_resolved and summary_resolved == baseline_resolved:
+        parser.error("--summary must not overwrite the regression baseline")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     results, elapsed = _execute_matrix(args.runs)
     current_medians = _seven_zip_medians(results)

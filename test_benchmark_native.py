@@ -203,6 +203,27 @@ class BenchmarkNativeTests(unittest.TestCase):
             self.assertNotEqual(code, 0)
             execute.assert_not_called()
 
+    def test_cli_refuses_output_that_would_overwrite_regression_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            baseline = Path(temp) / "baseline.json"
+            baseline.write_text("{}", encoding="utf-8")
+            with mock.patch.object(benchmark, "_execute_matrix") as execute:
+                code = benchmark.cli([
+                    "--output", str(baseline), "--regression-baseline", str(baseline),
+                ])
+            self.assertNotEqual(code, 0)
+            execute.assert_not_called()
+
+    def test_cli_baseline_creation_refuses_output_equal_to_summary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shared = Path(temp) / "shared.json"
+            with mock.patch.object(benchmark, "_execute_matrix") as execute:
+                code = benchmark.cli([
+                    "--create-baseline", "--output", str(shared), "--summary", str(shared),
+                ])
+            self.assertNotEqual(code, 0)
+            execute.assert_not_called()
+
     def test_cli_baseline_creation_mode_is_explicit_and_allows_new_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
