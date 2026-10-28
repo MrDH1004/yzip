@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "raw_json_path": ".omc\\artifacts\\native-performance-baseline\\baseline-five-datasets.json",
+  "raw_json_sha256": "21dbd8c8cadfa431a5a0e06d244710d332ce08cabada3d9c776a27bcf572b465",
+  "dataset_count": 5,
+  "case_count": 160,
+  "measured_runs_per_case": 7,
+  "warmup_runs_per_case": 1,
+  "elapsed_seconds": 2509.779309999998,
+  "dataset_sha256_trees": {
+    "large-text": "848d9e66ef0bbc4303849268beb46f56f5aa797bbbe0521d92cf20ee140b14be",
+    "incompressible": "944726753740b676e386139efef3b4e78824486178391e3e12c94784186a7b9b",
+    "small-files": "b9ad1dd98e4134e7b395b8668728d7f36ee6511860abd2ec5180a3ca8c5c72de",
+    "mixed-project": "ae0b7f758b4bd88a78f30e10a72c2783608d042b58f039608dddcb9901ea54ee",
+    "large-file": "154ab6037e0f2b51f6484891083cc46c1629215eb997e2290066034dc41dd0c3"
+  },
+  "seven_zip_8_thread_medians_seconds": {
+    "large-text": 0.2583310000045458,
+    "incompressible": 1.8268879999959609,
+    "small-files": 0.5675268999912078,
+    "mixed-project": 0.38204910000786185,
+    "large-file": 0.483163600001717
+  },
+  "regression_fraction": {
+    "large-text": 0.0,
+    "incompressible": 0.0,
+    "small-files": 0.0,
+    "mixed-project": 0.0,
+    "large-file": 0.0
+  }
+}
