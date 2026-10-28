@@ -1,4 +1,8 @@
 import ctypes
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,13 +90,64 @@ class LoaderTests(unittest.TestCase):
 
 class BuiltBridgeTests(unittest.TestCase):
     def test_built_x64_bridge_exports_expected_stub_abi(self):
-        dll = Path(__file__).parent / "nativeaccel" / "build" / "yzip_accel.dll"
+        configured = os.environ.get("YZIP_ACCEL_DLL")
+        dll = Path(configured) if configured else (
+            Path(__file__).parent / "nativeaccel" / "build" / "yzip_accel.dll"
+        )
         if not dll.exists():
+            if os.environ.get("YZIP_REQUIRE_ACCEL_DLL") == "1":
+                self.fail(f"required native accelerator DLL is missing: {dll}")
             self.skipTest("nativeaccel/build.ps1 has not run")
         accelerator = archive_accel.load_accelerator(dll)
         self.assertIsNotNone(accelerator, archive_accel.disabled_reason())
         self.assertEqual(0, accelerator.capabilities)
         self.assertEqual("", accelerator.last_error())
+
+
+class BuildContractTests(unittest.TestCase):
+    def test_msvc_build_uses_required_optimized_static_runtime_flags(self):
+        script = (Path(__file__).parent / "nativeaccel" / "build.ps1").read_text(
+            encoding="utf-8"
+        )
+        command = next(line for line in script.splitlines() if "cl /nologo" in line)
+        for required in ("/O2", "/GL", "/MT", "/LTCG"):
+            self.assertIn(required, command)
+        self.assertNotIn("/MD", command)
+
+    def test_fetch_reads_7zip_source_pin_from_committed_manifest(self):
+        root = Path(__file__).parent
+        script = (root / "fetch_tools.ps1").read_text(encoding="utf-8")
+        pins = json.loads(
+            (root / "nativeaccel" / "7zip-pins.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("ConvertFrom-Json", script)
+        self.assertIn("source_url", script)
+        self.assertIn("source_sha256", script)
+        self.assertNotIn(pins["source_url"], script)
+        self.assertNotIn(pins["source_sha256"], script)
+
+    def test_required_native_test_mode_fails_when_dll_is_missing(self):
+        missing = Path(tempfile.gettempdir()) / "required-yzip-accel-is-missing.dll"
+        environment = os.environ.copy()
+        environment["YZIP_ACCEL_DLL"] = str(missing)
+        environment["YZIP_REQUIRE_ACCEL_DLL"] = "1"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "test_archive_accel.BuiltBridgeTests.test_built_x64_bridge_exports_expected_stub_abi",
+                "-v",
+            ],
+            cwd=Path(__file__).parent,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("required native accelerator DLL is missing", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

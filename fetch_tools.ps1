@@ -7,8 +7,14 @@ param([switch]$Force)
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $tools = Join-Path $root "tools"
-$SEVENZIP_SOURCE_URL = "https://github.com/ip7z/7zip/releases/download/26.04/7z2604-src.tar.xz"
-$SEVENZIP_SOURCE_SHA256 = "9691944c0fe0d01bb49373a704fb983fd33bc98b1738695179dfbf99ac1734f6"
+$sevenZipPinsPath = Join-Path $root "nativeaccel\7zip-pins.json"
+$sevenZipPins = Get-Content -Raw -LiteralPath $sevenZipPinsPath | ConvertFrom-Json
+$sevenZipSourceUrl = [string]$sevenZipPins.source_url
+$sevenZipSourceSha256 = [string]$sevenZipPins.source_sha256
+$sevenZipVersion = [string]$sevenZipPins.version
+if (-not $sevenZipSourceUrl -or -not $sevenZipSourceSha256 -or -not $sevenZipVersion) {
+    throw "7-Zip pin manifest is missing source_url, source_sha256, or version: $sevenZipPinsPath"
+}
 
 # Official 7-Zip headers are retained only under the ignored tools junction.  The
 # committed pin manifest is checked again by nativeaccel/build.ps1.
@@ -20,13 +26,13 @@ if ($Force -or -not (Test-Path -LiteralPath $headerSentinel)) {
     try {
         $sourceArchive = Join-Path $headerWork "7z2604-src.tar.xz"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $SEVENZIP_SOURCE_URL -OutFile $sourceArchive -UseBasicParsing
+        Invoke-WebRequest -Uri $sevenZipSourceUrl -OutFile $sourceArchive -UseBasicParsing
         $sourceHash = (Get-FileHash $sourceArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($sourceHash -ne $SEVENZIP_SOURCE_SHA256) { throw "7-Zip source checksum mismatch: $sourceHash" }
+        if ($sourceHash -ne $sevenZipSourceSha256) { throw "7-Zip source checksum mismatch: $sourceHash" }
         New-Item -ItemType Directory -Force $headerRoot | Out-Null
         & tar.exe -xf $sourceArchive -C $headerRoot
         if ($LASTEXITCODE) { throw "7-Zip source extraction failed (exit $LASTEXITCODE)" }
-        Write-Output "tools: official 7-Zip 26.04 headers ($SEVENZIP_SOURCE_SHA256)"
+        Write-Output "tools: official 7-Zip $sevenZipVersion headers ($sevenZipSourceSha256)"
     } finally {
         Remove-Item -Recurse -Force $headerWork -ErrorAction SilentlyContinue
     }
