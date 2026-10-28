@@ -32,7 +32,8 @@ New-Item -ItemType Directory -Force $intermediate | Out-Null
 $builtDll = Join-Path $intermediate "yzip_accel.dll"
 $output = Join-Path $outputDirectoryFull "yzip_accel.dll"
 $source = Join-Path $PSScriptRoot "yzip_accel.cpp"
-$command = "call `"$vcvars`" >nul && cd /d `"$intermediate`" && cl /nologo /LD /std:c++17 /EHsc /O2 /GL /W4 /WX /MT /utf-8 `"$source`" /link /LTCG /MACHINE:X64 /OUT:`"$builtDll`""
+$sdkRoot = Join-Path $tools "7zip-src"
+$command = "call `"$vcvars`" >nul && cd /d `"$intermediate`" && cl /nologo /LD /std:c++17 /EHsc /O2 /GL /W4 /WX /MT /utf-8 /I`"$sdkRoot`" `"$source`" /link /LTCG /MACHINE:X64 /OUT:`"$builtDll`""
 & cmd.exe /d /s /c $command
 if ($LASTEXITCODE) { throw "MSVC x64 native accelerator build failed (exit $LASTEXITCODE)" }
 if (-not (Test-Path -LiteralPath $builtDll -PathType Leaf)) { throw "MSVC reported success but DLL is missing: $builtDll" }

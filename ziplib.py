@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 import zipwriter
+from archive_accel import (
+    CAP_ZIP_EXTRACT,
+    AccelStatus,
+    NativeZipJob,
+    load_accelerator,
+)
 
 pyzipper = None  # imported only for encrypted archives
 
@@ -27,6 +33,10 @@ class Cancelled(Exception):
 
 
 class BadPassword(Exception):
+    pass
+
+
+class NativeExtractionError(Exception):
     pass
 
 
@@ -246,6 +256,86 @@ class Archive:
     def needs_password(self) -> bool:
         return any(i.flag_bits & 1 for i in self._names.values())
 
+    def _native_accelerator(self):
+        if os.environ.get("YZIP_NATIVE_ZIP_EXTRACT") != "1":
+            return None
+        if self._tmp is not None:
+            return None
+        infos = self.zf.infolist()
+        if not infos or any(info.flag_bits & 1 for info in infos):
+            return None
+        methods = {info.compress_type for info in infos if not info.is_dir()}
+        if not methods or not methods.issubset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}):
+            return None
+        if len(methods) != 1:
+            return None
+        accelerator = load_accelerator()
+        if accelerator is None or not accelerator.capabilities & CAP_ZIP_EXTRACT:
+            return None
+        return accelerator
+
+    def _extract_native(self, accelerator, jobs, progress, cancel):
+        native_jobs = []
+        for index, name, info, target in jobs:
+            native_jobs.append(NativeZipJob(index, part_path(target), info.file_size, info.CRC))
+        try:
+            result = accelerator.extract_zip(self._real, native_jobs, progress, cancel)
+            if result.status == AccelStatus.CANCELLED:
+                raise Cancelled()
+            if result.status == AccelStatus.CORRUPT:
+                raise zipfile.BadZipFile("native ZIP CRC or size validation failed")
+            if result.status != AccelStatus.OK:
+                raise NativeExtractionError(
+                    f"native ZIP extraction failed with status {result.status.name}"
+                )
+            for job, (_index, name, info, _target) in zip(native_jobs, jobs):
+                size = 0
+                crc = 0
+                with open(job.staging_path, "rb") as extracted:
+                    while True:
+                        data = extracted.read(1 << 20)
+                        if not data:
+                            break
+                        size += len(data)
+                        if size > info.file_size:
+                            raise zipfile.BadZipFile(f"size mismatch: {name}")
+                        crc = zlib.crc32(data, crc)
+                if size != info.file_size or crc != info.CRC:
+                    raise zipfile.BadZipFile(f"CRC mismatch: {name}")
+
+            published = []
+            backups = []
+            try:
+                for job, (_index, _name, _info, target) in zip(native_jobs, jobs):
+                    backup = None
+                    if os.path.exists(target):
+                        backup = part_path(target) + ".native-backup"
+                        os.replace(target, backup)
+                        backups.append((backup, target))
+                    finish_part(job.staging_path, target)
+                    published.append((target, backup))
+            except BaseException:
+                for target, _backup in reversed(published):
+                    if os.path.exists(target):
+                        os.remove(target)
+                for backup, target in reversed(backups):
+                    if os.path.exists(backup):
+                        os.replace(backup, target)
+                raise
+            for backup, _target in backups:
+                if os.path.exists(backup):
+                    os.remove(backup)
+            for _index, _name, info, target in jobs:
+                try:
+                    timestamp = time.mktime(info.date_time + (0, 0, -1))
+                    os.utime(target, (timestamp, timestamp))
+                except (OverflowError, ValueError, OSError):
+                    pass
+        finally:
+            for job in native_jobs:
+                if os.path.exists(job.staging_path):
+                    os.remove(job.staging_path)
+
     def extract(self, dest: str, names: Optional[Iterable[str]] = None,
                 progress: Optional[Progress] = None, cancel: Optional[Callable[[], bool]] = None,
                 overwrite=True):
@@ -255,8 +345,9 @@ class Archive:
         total = sum(self._names[n].file_size for n in sel)
         root = os.path.realpath(dest)
         os.makedirs(root, exist_ok=True)
-        jobs, skipped = [], 0
+        jobs, directories, skipped = [], [], 0
         taken = set()  # targets already handed out in this run (rename mode)
+        source_indices = {id(info): index for index, info in enumerate(self.zf.infolist())}
 
         def free_name(target):
             if not os.path.exists(target) and target.lower() not in taken:
@@ -274,14 +365,31 @@ class Archive:
             if target is None:
                 continue
             if info.is_dir():
-                os.makedirs(target, exist_ok=True)
+                directories.append(target)
             elif overwrite is False and os.path.exists(target):
                 skipped += info.file_size
             else:
                 if overwrite == "rename":
                     target = free_name(target)
                     taken.add(target.lower())
-                jobs.append((n, info, target))
+                jobs.append((source_indices[id(info)], n, info, target))
+
+        # Names that differ only in case land on the same Windows file: keep the last.
+        jobs = list({target.lower(): job for job in jobs for target in (job[3],)}.values())
+        parents = dict.fromkeys(os.path.dirname(target) for _, _, _, target in jobs)
+        accelerator = self._native_accelerator()
+        if accelerator is not None and jobs:
+            for parent in parents:
+                if cancel and cancel():
+                    raise Cancelled()
+                os.makedirs(parent, exist_ok=True)
+            self._extract_native(accelerator, jobs, progress, cancel)
+            for directory in directories:
+                os.makedirs(directory, exist_ok=True)
+            return
+
+        for directory in directories:
+            os.makedirs(directory, exist_ok=True)
 
         state = {"done": skipped}
         lock = threading.Lock()
@@ -353,7 +461,7 @@ class Archive:
                 raise zipfile.BadZipFile(f"CRC mismatch: {info.filename}")
 
         def one(job):
-            n, info, target = job
+            _index, n, info, target = job
             if stop.is_set():
                 return
             if cancel and cancel():
@@ -385,10 +493,8 @@ class Archive:
                 pass
 
         # names that differ only in case land on the same Windows file: keep the last, never write it twice at once
-        jobs = list({t.lower(): (n, i, t) for n, i, t in jobs}.values())
         # Prepare shared parents once rather than issuing mkdir/stat/exists for
         # every small file. safe_target above still resolves every member path.
-        parents = dict.fromkeys(os.path.dirname(t) for _, _, t in jobs)
         for parent in parents:
             if cancel and cancel():
                 raise Cancelled()

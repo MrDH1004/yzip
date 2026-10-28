@@ -38,6 +38,9 @@ class FakeLibrary:
             ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint32)).contents.value = 1
 
         self.yz_accel_cancel = FakeFunction(cancel)
+        self.yz_accel_extract_zip = FakeFunction(
+            lambda _dll, _source, _jobs, _count, _limit, _progress, _cancel: archive_accel.AccelStatus.OK
+        )
 
 
 class LoaderTests(unittest.TestCase):
@@ -89,7 +92,7 @@ class LoaderTests(unittest.TestCase):
 
 
 class BuiltBridgeTests(unittest.TestCase):
-    def test_built_x64_bridge_exports_expected_stub_abi(self):
+    def test_built_x64_bridge_exports_zip_extraction_capability(self):
         configured = os.environ.get("YZIP_ACCEL_DLL")
         dll = Path(configured) if configured else (
             Path(__file__).parent / "nativeaccel" / "build" / "yzip_accel.dll"
@@ -100,7 +103,7 @@ class BuiltBridgeTests(unittest.TestCase):
             self.skipTest("nativeaccel/build.ps1 has not run")
         accelerator = archive_accel.load_accelerator(dll)
         self.assertIsNotNone(accelerator, archive_accel.disabled_reason())
-        self.assertEqual(0, accelerator.capabilities)
+        self.assertEqual(archive_accel.CAP_ZIP_EXTRACT, accelerator.capabilities)
         self.assertEqual("", accelerator.last_error())
 
 
@@ -136,7 +139,7 @@ class BuildContractTests(unittest.TestCase):
                 sys.executable,
                 "-m",
                 "unittest",
-                "test_archive_accel.BuiltBridgeTests.test_built_x64_bridge_exports_expected_stub_abi",
+                "test_archive_accel.BuiltBridgeTests.test_built_x64_bridge_exports_zip_extraction_capability",
                 "-v",
             ],
             cwd=Path(__file__).parent,
